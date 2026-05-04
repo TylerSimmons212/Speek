@@ -1,0 +1,43 @@
+name: Speek
+options:
+  bundleIdPrefix: com.tylersimmons
+  deploymentTarget:
+    macOS: "26.0"
+  developmentLanguage: en
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+targets:
+  Speek:
+    type: application
+    platform: macOS
+    sources:
+      - path: Speek
+    info:
+      path: Speek/Resources/Info.plist
+      properties:
+        NSMicrophoneUsageDescription: Speek transcribes your dictation locally on this Mac.
+        LSUIElement: true
+        NSPrincipalClass: NSApplication
+        CFBundleName: Speek
+        CFBundleDisplayName: Speek
+    entitlements:
+      path: Speek/Resources/Speek.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+        com.apple.developer.foundation-models: true
+  SpeekTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: SpeekTests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: Speek
