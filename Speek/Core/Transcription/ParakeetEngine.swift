@@ -1,7 +1,9 @@
 import FluidAudio
 import Foundation
 
-/// FluidAudio-backed transcription engine using the Parakeet TDT v3 model.
+/// FluidAudio-backed transcription engine using the Parakeet TDT v2 model
+/// (English-only — slightly better English recall than v3 multilingual per
+/// FluidAudio docs, and Speek is English-only for v1).
 ///
 /// The plan's draft assumed an `AsrPipeline` type with a one-shot
 /// `transcribe(samples:sampleRate:)` entry point. The actual FluidAudio API
@@ -23,7 +25,7 @@ final class ParakeetEngine: TranscriptionEngine {
     private let decoderLayers: Int
 
     init() async throws {
-        let models = try await AsrModels.downloadAndLoad(version: .v3)
+        let models = try await AsrModels.downloadAndLoad(version: .v2)
         let manager = AsrManager(config: .default)
         try await manager.loadModels(models)
         self.manager = manager
