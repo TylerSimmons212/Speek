@@ -17,6 +17,7 @@ struct SpeekApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkey = HotkeyManager()
     private let audio = AudioCaptureService()
+    private let perms = PermissionsCoordinator()
     private var transcriber: ParakeetEngine?
     private var session: DictationSession?
     private var menuBar: MenuBarController?
@@ -32,6 +33,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func setUp() async {
+        perms.refresh()
+        if !perms.hasMic { await perms.requestMic() }
+        if !perms.hasAccessibility { perms.requestAccessibility() }
+
         // Load Parakeet (model download on first launch).
         do {
             self.transcriber = try await ParakeetEngine()
