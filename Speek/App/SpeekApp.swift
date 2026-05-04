@@ -13,14 +13,25 @@ struct SpeekApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkey = HotkeyManager()
     private let audio = AudioCaptureService()
+    private var transcriber: ParakeetEngine?
     private var cancellables = Set<AnyCancellable>()
     private var captureTask: Task<Void, Never>?
+    private var collectedSamples: [Float] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        Task { @MainActor in
+            do {
+                self.transcriber = try await ParakeetEngine()
+                print("Parakeet ready")
+            } catch {
+                print("Parakeet load failed: \(error)")
+            }
+        }
         hotkey.events
             .sink { [weak self] event in self?.handle(event: event) }
             .store(in: &cancellables)
@@ -30,18 +41,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handle(event: HotkeyManager.Event) {
         switch event {
         case .pressed:
-            captureTask = Task { [audio] in
+            collectedSamples = []
+            let audio = self.audio
+            captureTask = Task { @MainActor [weak self] in
                 do {
                     let stream = try await audio.start()
-                    var total = 0
-                    for await chunk in stream { total += chunk.count }
-                    print("Total samples: \(total)")
+                    for await chunk in stream {
+                        self?.collectedSamples.append(contentsOf: chunk)
+                    }
                 } catch {
                     print("audio error: \(error)")
                 }
             }
         case .released:
-            Task { [audio] in await audio.stop() }
+            let audio = self.audio
+            let transcriber = self.transcriber
+            let samples = collectedSamples
+            Task {
+                await audio.stop()
+                guard let transcriber else { return }
+                do {
+                    let text = try await transcriber.transcribe(samples: samples)
+                    print("Transcript: \(text)")
+                } catch {
+                    print("transcribe error: \(error)")
+                }
+            }
         }
     }
 }
