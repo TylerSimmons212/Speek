@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import ServiceManagement
 
 @MainActor
 final class SettingsStore: ObservableObject {
@@ -19,7 +20,10 @@ final class SettingsStore: ObservableObject {
         didSet { sync.setBool(axInsertionEnabled, forKey: "axEnabled") }
     }
     @Published var launchAtLogin: Bool {
-        didSet { sync.setBool(launchAtLogin, forKey: "launchAtLogin") }
+        didSet {
+            sync.setBool(launchAtLogin, forKey: "launchAtLogin")
+            applyLaunchAtLogin(launchAtLogin)
+        }
     }
 
     private let sync: SyncStore
@@ -30,5 +34,15 @@ final class SettingsStore: ObservableObject {
         self.foundationModelsEnabled = sync.bool(forKey: "fmEnabled")
         self.axInsertionEnabled = sync.bool(forKey: "axEnabled")
         self.launchAtLogin = sync.bool(forKey: "launchAtLogin")
+    }
+}
+
+extension SettingsStore {
+    func applyLaunchAtLogin(_ enabled: Bool) {
+        if enabled {
+            try? SMAppService.mainApp.register()
+        } else {
+            try? SMAppService.mainApp.unregister()
+        }
     }
 }
