@@ -33,7 +33,9 @@ actor FMPolishStage: PolishStage {
     var isAvailable: Bool { session != nil }
 
     func run(_ input: String) async -> String {
-        guard !input.isEmpty, let session else { return input }
+        guard !input.isEmpty else { return input }
+        let enabled = await MainActor.run { SettingsStore.shared.foundationModelsEnabled }
+        guard enabled, let session else { return input }
         do {
             let result = try await session.respond(
                 to: "Clean up this dictated transcript:\n\n\(input)",
