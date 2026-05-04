@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var transcriber: ParakeetEngine?
     private var session: DictationSession?
     private var menuBar: MenuBarController?
+    private var overlay: RecordingOverlayWindow?
     private var cancellables = Set<AnyCancellable>()
 
     nonisolated func applicationDidFinishLaunching(_ notification: Notification) {
@@ -52,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         self.session = session
         self.menuBar = MenuBarController(session: session)
+        self.overlay = RecordingOverlayWindow(session: session)
 
         hotkey.events
             .sink { [weak self] event in self?.handle(event: event, session: session) }
