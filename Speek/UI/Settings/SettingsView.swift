@@ -29,15 +29,3 @@ struct SettingsView: View {
         .frame(width: 460, height: 360)
     }
 }
-
-// Temporary stub — Task 5.1 replaces this with a real SyncStore-backed store and moves it to a separate file.
-@MainActor
-final class SettingsStore: ObservableObject {
-    static let shared = SettingsStore()
-    enum HotkeyChoice: String { case fn, rightOption, rightCommand }
-    @Published var hotkeyChoice: HotkeyChoice = .fn
-    @Published var micDeviceID: String = "default"
-    @Published var foundationModelsEnabled: Bool = true
-    @Published var axInsertionEnabled: Bool = true
-    @Published var launchAtLogin: Bool = false
-}
