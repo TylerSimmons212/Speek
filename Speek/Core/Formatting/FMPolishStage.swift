@@ -1,10 +1,17 @@
 import FoundationModels
 import Foundation
 
+/// Abstraction over the polish stage so the pipeline can be tested with stubs.
+/// FMPolishStage is the production implementation backed by Apple Foundation Models.
+protocol PolishStage: Sendable, Actor {
+    var isAvailable: Bool { get async }
+    func run(_ input: String) async -> String
+}
+
 /// LLM polish stage. Sends rule-cleaned text to the on-device 3B Foundation Models
 /// model with a guided-generation rewrite prompt.
 /// Skipped (returns input unchanged) when Apple Intelligence is unavailable.
-actor FMPolishStage {
+actor FMPolishStage: PolishStage {
     @Generable
     struct PolishedTranscript {
         @Guide(description: "The cleaned-up version of the user's dictated text. Preserve the user's intent. Fix punctuation, casing, and grammar. Do not add or remove substantive content.")
