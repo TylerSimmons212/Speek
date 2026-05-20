@@ -32,4 +32,75 @@ final class RuleStageTests: XCTestCase {
     func test_empty_string_returns_empty() {
         XCTAssertEqual(stage.run(""), "")
     }
+
+    func test_resolves_single_word_correction_actually() {
+        XCTAssertEqual(stage.run("lunch on Friday, actually Saturday"), "Lunch on Saturday")
+    }
+
+    func test_resolves_single_word_correction_i_mean() {
+        XCTAssertEqual(stage.run("call John, I mean Mary"), "Call Mary")
+    }
+
+    func test_resolves_single_word_correction_no_wait() {
+        XCTAssertEqual(stage.run("meet at three, no wait, four"), "Meet at four")
+    }
+
+    func test_resolves_full_clause_rewrite() {
+        XCTAssertEqual(
+            stage.run("send it to John, actually send it to Mary"),
+            "Send it to Mary"
+        )
+    }
+
+    func test_flags_ambiguous_correction() {
+        let result = stage.process("Friday, actually next Saturday")
+        XCTAssertTrue(result.possibleAmbiguousCorrection)
+        // Text is left unchanged so the LLM can decide.
+        XCTAssertEqual(result.text, "Friday, actually next Saturday")
+    }
+
+    func test_non_correction_text_is_not_flagged() {
+        let result = stage.process("hello world")
+        XCTAssertFalse(result.possibleAmbiguousCorrection)
+    }
+
+    // MARK: Voice commands
+
+    func test_voice_command_period() {
+        XCTAssertEqual(stage.run("this is the end period"), "This is the end.")
+    }
+
+    func test_voice_command_comma() {
+        XCTAssertEqual(stage.run("first comma second comma third"), "First, second, third")
+    }
+
+    func test_voice_command_new_line() {
+        XCTAssertEqual(stage.run("line one new line line two"), "Line one\nLine two")
+    }
+
+    func test_voice_command_question_mark() {
+        XCTAssertEqual(stage.run("are you there question mark"), "Are you there?")
+    }
+
+    // MARK: Number formatting
+
+    func test_number_year_style() {
+        XCTAssertEqual(stage.run("the year is twenty twenty four"), "The year is 2024")
+    }
+
+    func test_number_hundreds() {
+        XCTAssertEqual(stage.run("there are one hundred twenty three apples"), "There are 123 apples")
+    }
+
+    func test_currency_dollars() {
+        XCTAssertEqual(stage.run("it costs five hundred dollars"), "It costs $500")
+    }
+
+    func test_date_ordinal() {
+        XCTAssertEqual(stage.run("meet on may fifth"), "Meet on May 5")
+    }
+
+    func test_decimal_point() {
+        XCTAssertEqual(stage.run("pi is three point one four"), "Pi is 3.14")
+    }
 }

@@ -1,9 +1,11 @@
 import AppKit
 import Combine
+import SwiftUI
 
 @MainActor
 final class MenuBarController {
     private let statusItem: NSStatusItem
+    private let settingsWindow = SettingsWindowController()
     private var cancellables = Set<AnyCancellable>()
 
     init(session: DictationSession) {
@@ -13,10 +15,15 @@ final class MenuBarController {
         }
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(NSMenuItem.separator())
+        // Leave Quit's target = nil so the action routes up the responder
+        // chain to NSApplication (which implements terminate:). Setting
+        // target = self would force macOS to validate the selector against
+        // this controller and disable the item.
         menu.addItem(NSMenuItem(title: "Quit Speek", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        for item in menu.items where item.action != nil { item.target = self }
         statusItem.menu = menu
 
         session.$state
@@ -37,6 +44,32 @@ final class MenuBarController {
     }
 
     @objc private func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        settingsWindow.show()
+    }
+}
+
+@MainActor
+final class SettingsWindowController {
+    private var window: NSWindow?
+
+    func show() {
+        if window == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.title = "Speek Settings"
+            window.contentViewController = NSHostingController(rootView: SettingsView())
+            window.isReleasedWhenClosed = false
+            window.center()
+            self.window = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
     }
 }

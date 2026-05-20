@@ -37,5 +37,9 @@ actor NoopPolish: PolishStage {
 
 final class CapturingInjector: TextInjector, @unchecked Sendable {
     var received: String?
-    func insert(_ text: String) async throws { received = text }
+    var resultToReturn: InjectionResult = .inserted
+    func insert(_ text: String) async throws -> InjectionResult {
+        received = text
+        return resultToReturn
+    }
 }

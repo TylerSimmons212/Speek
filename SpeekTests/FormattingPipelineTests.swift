@@ -2,13 +2,34 @@ import XCTest
 @testable import Speek
 
 final class FormattingPipelineTests: XCTestCase {
-    func test_runs_rule_stage_then_fm_stage() async {
+    func test_skips_fm_when_no_correction_markers() async {
+        // Non-ambiguous input — FM stage should NOT run.
+        let rule = RuleStage()
+        let fm = StubPolish(transform: { _ in fatalError("should not run") })
+        let pipeline = FormattingPipeline(rule: rule, polish: fm)
+
+        let result = await pipeline.run("um hello world")
+        XCTAssertEqual(result, "Hello world")
+    }
+
+    func test_skips_fm_when_rule_resolves_correction_cleanly() async {
+        // Clean word-swap correction — RuleStage handles it, FM should NOT run.
+        let rule = RuleStage()
+        let fm = StubPolish(transform: { _ in fatalError("should not run") })
+        let pipeline = FormattingPipeline(rule: rule, polish: fm)
+
+        let result = await pipeline.run("lunch on Friday, actually Saturday")
+        XCTAssertEqual(result, "Lunch on Saturday")
+    }
+
+    func test_falls_through_to_fm_when_correction_ambiguous() async {
+        // Two-word Y with one-word X → ambiguous → FM runs.
         let rule = RuleStage()
         let fm = StubPolish(transform: { $0 + " [polished]" })
         let pipeline = FormattingPipeline(rule: rule, polish: fm)
 
-        let result = await pipeline.run("um hello world")
-        XCTAssertEqual(result, "Hello world [polished]")
+        let result = await pipeline.run("Friday, actually next Saturday")
+        XCTAssertEqual(result, "Friday, actually next Saturday [polished]")
     }
 
     func test_skips_fm_when_unavailable() async {
@@ -16,8 +37,9 @@ final class FormattingPipelineTests: XCTestCase {
         let fm = StubPolish(transform: { _ in fatalError("should not run") }, isAvailable: false)
         let pipeline = FormattingPipeline(rule: rule, polish: fm)
 
-        let result = await pipeline.run("um hello world")
-        XCTAssertEqual(result, "Hello world")
+        let result = await pipeline.run("Friday, actually next Saturday")
+        // Ambiguous, but polish stage unavailable — return rule output unchanged.
+        XCTAssertEqual(result, "Friday, actually next Saturday")
     }
 }
 
