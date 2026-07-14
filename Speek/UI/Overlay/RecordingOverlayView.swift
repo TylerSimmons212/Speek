@@ -5,17 +5,49 @@ struct RecordingOverlayView: View {
     @ObservedObject var learner = CorrectionLearner.shared
 
     var body: some View {
-        ZStack {
-            statusPill
-                .opacity(session.state == .idle ? 0 : 1)
-            if let learned = learner.lastLearned, session.state == .idle {
-                learnedPill(for: learned)
-                    .transition(.opacity)
+        VStack(spacing: 8) {
+            if showPreview {
+                previewBox
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+            ZStack {
+                statusPill
+                    .opacity(session.state == .idle ? 0 : 1)
+                if let learned = learner.lastLearned, session.state == .idle {
+                    learnedPill(for: learned)
+                        .transition(.opacity)
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .animation(.easeInOut(duration: 0.18), value: session.state)
         .animation(.easeInOut(duration: 0.18), value: learner.lastLearned)
+        .animation(.easeInOut(duration: 0.15), value: showPreview)
+    }
+
+    /// Live rolling transcript while recording (and during processing, so the
+    /// words don't vanish the instant the key is released).
+    private var showPreview: Bool {
+        guard !session.partialText.isEmpty else { return false }
+        return session.state == .recording || session.state == .processing
+    }
+
+    private var previewBox: some View {
+        Text(session.partialText)
+            .font(.system(size: 13, weight: .regular, design: .rounded))
+            .foregroundStyle(.white.opacity(0.92))
+            .lineLimit(3)
+            // Head truncation: when the transcript outgrows three lines, the
+            // beginning truncates and the newest words stay visible — the tail
+            // is what the user needs to confirm they're being heard correctly.
+            .truncationMode(.head)
+            .multilineTextAlignment(.leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: 440, alignment: .leading)
+            .background(.black.opacity(0.7))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .shadow(radius: 8)
     }
 
     private var statusPill: some View {

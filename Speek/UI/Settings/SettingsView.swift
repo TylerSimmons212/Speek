@@ -88,6 +88,19 @@ private struct GeneralPane: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            Section("Overlay") {
+                Picker("Style", selection: $settings.overlayStyle) {
+                    Text("Notch (Dynamic Island)").tag(SettingsStore.OverlayStyle.notch)
+                    Text("Bottom pill").tag(SettingsStore.OverlayStyle.bottomPill)
+                }
+                Text("Notch style expands out of the MacBook notch — on screens without a notch it floats at the top center.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Toggle("Show live transcript while dictating", isOn: $settings.livePreviewEnabled)
+                Text("Words appear in the overlay as you speak. Turning this off saves a little battery on long dictations.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             Section("Startup") {
                 Toggle("Launch at login", isOn: $settings.launchAtLogin)
             }

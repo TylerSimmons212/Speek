@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var session: DictationSession?
     private var menuBar: MenuBarController?
     private var overlay: RecordingOverlayWindow?
+    private var notchOverlay: NotchOverlayController?
     private var cancellables = Set<AnyCancellable>()
     /// Press timestamp for the current key press, used to classify hold vs tap.
     private var pressStartTime: Date?
@@ -86,7 +87,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
         self.menuBar = MenuBarController(session: session)
-        self.overlay = RecordingOverlayWindow(session: session)
+        buildOverlay(style: SettingsStore.shared.overlayStyle, session: session)
+
+        // Swap the overlay live when the user changes the style in Settings.
+        SettingsStore.shared.$overlayStyle
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] style in
+                guard let self, let session = self.session else { return }
+                self.buildOverlay(style: style, session: session)
+            }
+            .store(in: &cancellables)
 
         hotkey.configure(for: SettingsStore.shared.hotkeyChoice)
         hotkey.events
@@ -120,6 +131,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rule: RuleStage(customReplacements: vocabulary),
             polish: FMPolishStage()
         )
+    }
+
+    /// Tears down whichever overlay is active and builds the requested style.
+    private func buildOverlay(style: SettingsStore.OverlayStyle, session: DictationSession) {
+        overlay?.close()
+        overlay = nil
+        notchOverlay?.dismiss()
+        notchOverlay = nil
+        switch style {
+        case .notch:
+            notchOverlay = NotchOverlayController(session: session)
+        case .bottomPill:
+            overlay = RecordingOverlayWindow(session: session)
+        }
     }
 
     private func handle(event: HotkeyManager.Event, session: DictationSession) {

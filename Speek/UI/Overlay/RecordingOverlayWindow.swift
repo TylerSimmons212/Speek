@@ -9,10 +9,13 @@ final class RecordingOverlayWindow {
 
     init(session: DictationSession) {
         let host = NSHostingController(rootView: RecordingOverlayView(session: session))
-        // Wide panel so the "Learned …" pill can grow as wide as it needs to.
-        // The panel itself is transparent; only the capsule inside is visible.
+        // Wide panel so the "Learned …" pill can grow as wide as it needs to,
+        // tall enough for the live-preview box to stack above the status pill
+        // (content is bottom-aligned, so the pill stays put and the preview
+        // grows upward). The panel itself is transparent; only the capsule
+        // and preview box inside are visible.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 44),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 170),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -58,6 +61,12 @@ final class RecordingOverlayWindow {
             .publisher(for: NSApplication.didChangeScreenParametersNotification)
             .sink { [weak self] _ in self?.positionBottomCenter() }
             .store(in: &cancellables)
+    }
+
+    /// Removes the panel from screen. Called when the user switches to the
+    /// notch overlay style — the panel object itself is released by the owner.
+    func close() {
+        panel.orderOut(nil)
     }
 
     /// Centers the pill horizontally on whichever screen currently contains

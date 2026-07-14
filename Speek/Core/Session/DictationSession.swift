@@ -16,6 +16,9 @@ final class DictationSession: ObservableObject {
     /// 0…1 RMS amplitude of the most recent audio chunk while recording.
     /// Drives the live level meter in the overlay pill.
     @Published private(set) var audioLevel: Float = 0
+    /// Rolling transcript of the current recording, updated every preview
+    /// tick. Empty when live preview is disabled or nothing decoded yet.
+    @Published private(set) var partialText: String = ""
 
     private let audio: AudioCaptureService
     private let transcriber: any TranscriptionEngine
@@ -26,6 +29,16 @@ final class DictationSession: ObservableObject {
 
     private var samples: [Float] = []
     private var captureTask: Task<Void, Never>?
+    private var previewTask: Task<Void, Never>?
+    /// Seconds between live-preview decodes. Each tick re-transcribes the
+    /// whole buffer; on the ANE this is fast enough that a fixed cadence
+    /// works, and because the decode happens inline in the loop, a slow
+    /// decode naturally stretches the effective interval (built-in
+    /// backpressure — ticks are never stacked).
+    private let previewInterval: TimeInterval = 0.5
+    /// Don't bother decoding less than this much audio (0.5s @ 16kHz) —
+    /// sub-half-second buffers waste a decode on silence or half a phoneme.
+    private let previewMinSamples = 8000
 
     init(
         audio: AudioCaptureService,
@@ -46,6 +59,10 @@ final class DictationSession: ObservableObject {
         state = .recording
         samples = []
         audioLevel = 0
+        partialText = ""
+        if SettingsStore.shared.livePreviewEnabled {
+            startPreviewLoop()
+        }
         captureTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -75,15 +92,45 @@ final class DictationSession: ObservableObject {
         return min(1, raw * 4)
     }
 
+    /// Re-transcribes the accumulated buffer on a fixed cadence and publishes
+    /// a flicker-stable rolling transcript. Runs only while recording; the
+    /// final transcript still comes from the full pipeline in stopRecording()
+    /// — this loop is purely cosmetic feedback.
+    private func startPreviewLoop() {
+        previewTask?.cancel()
+        let intervalNs = UInt64(previewInterval * 1_000_000_000)
+        let minSamples = previewMinSamples
+        previewTask = Task { [weak self] in
+            var merger = PartialTranscriptMerger()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalNs)
+                guard let self, !Task.isCancelled else { return }
+                guard self.state == .recording else { return }
+                let snapshot = self.samples
+                guard snapshot.count >= minSamples else { continue }
+                // Preview failures are non-events — skip the tick and let the
+                // next one try again. AsrManager is an actor, so this decode
+                // and the final decode in stopRecording() serialize safely.
+                guard let text = try? await self.transcriber.transcribe(samples: snapshot) else { continue }
+                guard !Task.isCancelled, self.state == .recording else { return }
+                let display = merger.merge(text)
+                if !display.isEmpty { self.partialText = display }
+            }
+        }
+    }
+
     func stopRecording() async {
         guard state == .recording else { return }
         await audio.stop()
         captureTask?.cancel()
+        previewTask?.cancel()
+        previewTask = nil
         state = .processing
 
         do {
             let raw = try await transcriber.transcribe(samples: samples)
             let formatted = await pipeline.run(raw)
+            partialText = ""
             state = .inserting
             let result = try await injector.insert(formatted)
             if result == .copied {
@@ -99,6 +146,7 @@ final class DictationSession: ObservableObject {
                 state = .idle
             }
         } catch {
+            partialText = ""
             state = .error(error.localizedDescription)
             // Auto-clear after 2s
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -113,7 +161,10 @@ final class DictationSession: ObservableObject {
         guard state == .recording else { return }
         await audio.stop()
         captureTask?.cancel()
+        previewTask?.cancel()
+        previewTask = nil
         samples = []
+        partialText = ""
         state = .idle
     }
 
