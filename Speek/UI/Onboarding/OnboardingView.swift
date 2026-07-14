@@ -60,17 +60,15 @@ struct OnboardingView: View {
                 tryoutSucceeded = true
             }
         }
-        // Whenever a permission lands, pull the user back into the flow —
-        // they're otherwise stranded in System Settings or behind a dialog.
-        .onChange(of: perms.hasMic) { _, granted in
-            if granted, step == .permissions { onRefocus() }
+        // Pull the user back into the flow once BOTH required permissions
+        // are in — refocusing on every individual grant yanks them out of
+        // System Settings while they're still mid-flow granting the next one.
+        .onChange(of: requiredPermissionsGranted) { _, allGranted in
+            if allGranted, step == .permissions { onRefocus() }
         }
-        .onChange(of: perms.hasInputMonitoring) { _, granted in
-            if granted, step == .permissions { onRefocus() }
-        }
-        .onChange(of: perms.hasAccessibility) { _, granted in
-            if granted, step == .permissions { onRefocus() }
-        }
+        // Mic is the exception: its native dialog floats over our window, so
+        // returning immediately after it resolves feels natural (no Settings
+        // round-trip involved) — handled in the mic row's action.
     }
 
     @ViewBuilder private var content: some View {
