@@ -18,6 +18,16 @@ final class CompositeInjector: TextInjector, ContextAwareInjector {
     }
 
     private func insertCore(_ text: String, adjustToContext: Bool) async throws -> InjectionResult {
+        // Dictating into one of our OWN windows (onboarding playground,
+        // settings fields): every AX call below would target our own process
+        // and deadlock against our own main thread. Synthesized keystrokes
+        // via the HID tap are the only safe path — take it directly.
+        let ownWindow = await MainActor.run { FocusOwnership.ownWindowFocused }
+        if ownWindow {
+            log.debug("target is our own window — typing directly, no AX")
+            return try await fallback.insert(text)
+        }
+
         // Wake up the front app's AX tree if it's an Electron/Chromium host —
         // their accessibility trees are dormant by default and refuse to
         // expose text-input roles until we set these attributes.

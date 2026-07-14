@@ -30,7 +30,11 @@ final class TypingInjector: TextInjector {
         await Self.waitForModifierRelease()
 
         let src = CGEventSource(stateID: .combinedSessionState)
-        let targetPid = Self.focusedElementPid()
+        // The PID lookup is an AX query against the focused element — skip it
+        // when focus is in our own app (self-AX deadlocks) and post through
+        // the HID tap, which the system routes to our focused window anyway.
+        let ownWindow = await MainActor.run { FocusOwnership.ownWindowFocused }
+        let targetPid = ownWindow ? nil : Self.focusedElementPid()
         let utf16 = Array(text.utf16)
 
         for range in Self.chunkRanges(for: utf16, maxLength: Self.maxUnitsPerEvent) {

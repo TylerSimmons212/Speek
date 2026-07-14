@@ -24,6 +24,19 @@ struct FieldSnapshot: @unchecked Sendable {  // AXUIElement is a thread-safe CF 
     }
 }
 
+/// Detects whether keyboard focus is inside one of Speek's own windows.
+/// Every accessibility call that targets the focused element MUST check this
+/// first: AX queries against our own process are answered by our own main
+/// thread, so a synchronous self-query or self-write deadlocks the app
+/// (observed live: insertCore frozen in AXUIElementSetAttributeValue during
+/// the onboarding tryout, which dictates into Speek's own TextEditor).
+enum FocusOwnership {
+    @MainActor
+    static var ownWindowFocused: Bool {
+        NSApp.isActive && NSApp.keyWindow != nil
+    }
+}
+
 enum FieldContextReader {
     /// The seam-repair span is capped: a "fragment" longer than this is almost
     /// certainly not an unfinished sentence (weird field content), and we
@@ -37,6 +50,8 @@ enum FieldContextReader {
     /// user's selection is the app's paste semantics, not ours to reformat).
     @MainActor
     static func capture() -> FieldSnapshot? {
+        // Self-AX deadlocks — never capture context from our own windows.
+        guard !FocusOwnership.ownWindowFocused else { return nil }
         let systemWide = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,

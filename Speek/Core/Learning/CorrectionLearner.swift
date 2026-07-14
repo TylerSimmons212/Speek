@@ -49,6 +49,9 @@ final class CorrectionLearner: ObservableObject {
         snapshot = nil
 
         guard SettingsStore.shared.learnFromCorrections else { return }
+        // Never watch our own windows — the polling reads are self-AX
+        // queries, which deadlock against our own main thread.
+        guard !FocusOwnership.ownWindowFocused else { return }
         guard let element = Self.focusedAXElement() else { return }
         guard let postInsertionText = Self.readAXValue(element) else { return }
 
