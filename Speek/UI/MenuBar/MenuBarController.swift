@@ -74,10 +74,10 @@ final class SettingsWindowController {
             window.isReleasedWhenClosed = false
             // Center on the user's active screen at creation; after that,
             // respect wherever they drag it (standard Mac behavior). The
-            // layout pass must run first — the SwiftUI hosting controller
-            // resets the frame, and centering a zero-size window parks its
-            // corner at screen center instead.
-            window.layoutIfNeeded()
+            // SwiftUI hosting controller zeroes the frame until first layout,
+            // so set the known content size explicitly before centering —
+            // never layoutIfNeeded(), which deadlocks TextKit-hosting views.
+            window.setContentSize(NSSize(width: 720, height: 520))
             window.centerOnActiveScreen()
             self.window = window
         }

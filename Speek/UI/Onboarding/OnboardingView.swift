@@ -303,16 +303,19 @@ final class OnboardingWindowController {
             )
             self.window = window
         }
-        // Assigning a SwiftUI contentViewController resets the window frame;
-        // the real size only exists after the hosting view's first layout.
-        // Force that layout, THEN center — centering earlier computes against
-        // a zero-size frame and parks the window's corner at screen center.
-        window?.layoutIfNeeded()
+        // Assigning a SwiftUI contentViewController resets the window frame
+        // to zero until the first layout pass — so centering must not read
+        // `frame` yet. Do NOT force layout here either: layoutIfNeeded() on a
+        // window hosting a TextEditor deadlocks against TextKit's async
+        // layout thread (observed: os_unfair_lock wait inside
+        // NSTextContentStorage.documentRange). The content size is a known
+        // constant, so just set it explicitly and center on that.
+        window?.setContentSize(NSSize(width: 620, height: 520))
         window?.centerOnActiveScreen()
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
-        // Belt and suspenders: re-center after the present pass in case the
-        // hosting view resized again while coming on screen.
+        // Re-center after the present pass in case the hosting view resized
+        // during its natural (asynchronous, deadlock-free) first layout.
         DispatchQueue.main.async { [weak self] in
             self?.window?.centerOnActiveScreen()
         }
