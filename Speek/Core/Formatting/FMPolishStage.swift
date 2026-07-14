@@ -63,9 +63,9 @@ actor FMPolishStage: PolishStage {
 
     func run(_ input: String) async -> String {
         guard !input.isEmpty else { return input }
-        let enabled = await MainActor.run { SettingsStore.shared.foundationModelsEnabled }
+        let enabled = await MainActor.run { SettingsStore.shared.polishEngine == .appleIntelligence }
         guard enabled else {
-            NSLog("FMPolishStage: skipped — toggle is OFF in Settings")
+            NSLog("FMPolishStage: skipped — engine is not Apple Intelligence in Settings")
             return input
         }
         guard let session else {

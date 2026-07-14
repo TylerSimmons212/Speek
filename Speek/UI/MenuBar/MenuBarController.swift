@@ -18,6 +18,9 @@ final class MenuBarController {
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        let updatesItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        updatesItem.target = self
+        menu.addItem(updatesItem)
         menu.addItem(NSMenuItem.separator())
         // Leave Quit's target = nil so the action routes up the responder
         // chain to NSApplication (which implements terminate:). Setting
@@ -45,6 +48,10 @@ final class MenuBarController {
 
     @objc private func openSettings() {
         settingsWindow.show()
+    }
+
+    @objc private func checkForUpdates() {
+        UpdaterService.shared.checkForUpdates()
     }
 }
 

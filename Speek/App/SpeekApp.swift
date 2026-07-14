@@ -79,15 +79,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         self.session = session
 
-        // Rebuild the pipeline whenever the user edits their custom vocabulary.
-        SettingsStore.shared.$customReplacements
-            .dropFirst()
-            .sink { [weak self] vocab in
-                self?.session?.pipeline = Self.makePipeline(with: vocab)
-            }
-            .store(in: &cancellables)
+        // Rebuild the pipeline whenever anything it derives from changes:
+        // custom vocabulary, polish engine/mode, or LLM connection details.
+        let settings = SettingsStore.shared
+        Publishers.MergeMany(
+            settings.$customReplacements.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$polishEngine.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$polishMode.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$llmEndpoint.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$llmModel.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            settings.$llmAPIKey.dropFirst().map { _ in () }.eraseToAnyPublisher()
+        )
+        .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+        .sink { [weak self] in
+            self?.session?.pipeline = Self.makePipeline(with: SettingsStore.shared.customReplacements)
+        }
+        .store(in: &cancellables)
         self.menuBar = MenuBarController(session: session)
         buildOverlay(style: SettingsStore.shared.overlayStyle, session: session)
+
+        // Start Sparkle's background update-check cycle.
+        _ = UpdaterService.shared
 
         // Swap the overlay live when the user changes the style in Settings.
         SettingsStore.shared.$overlayStyle
@@ -127,9 +139,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///     discarded (no transcription).
     ///   - Any press while latched in toggle mode ends the recording.
     private static func makePipeline(with vocabulary: [String: String]) -> FormattingPipeline {
-        FormattingPipeline(
+        let settings = SettingsStore.shared
+        let polish: any PolishStage
+        switch settings.polishEngine {
+        case .off:
+            polish = NullPolishStage()
+        case .appleIntelligence:
+            polish = FMPolishStage()
+        case .customLLM:
+            polish = LLMPolishStage(config: .init(
+                endpoint: settings.llmEndpoint,
+                model: settings.llmModel,
+                apiKey: settings.llmAPIKey
+            ))
+        }
+        return FormattingPipeline(
             rule: RuleStage(customReplacements: vocabulary),
-            polish: FMPolishStage()
+            polish: polish,
+            mode: settings.polishMode
         )
     }
 

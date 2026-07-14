@@ -109,7 +109,29 @@ echo "🔎 Verifying..."
 xcrun stapler validate "$DMG_PATH"
 spctl --assess --type open --context context:primary-signature "$DMG_PATH" 2>&1 || true
 
+echo "📡 Generating Sparkle appcast..."
+# generate_appcast signs the DMG with the EdDSA key from the login keychain
+# and writes/updates appcast.xml alongside it. --download-url-prefix points
+# enclosure URLs at the GitHub release asset location for this version.
+VERSION=$(defaults read "$APP_PATH/Contents/Info" CFBundleShortVersionString)
+SPARKLE_BIN="${SPARKLE_BIN:-/tmp/sparkle-dist/bin}"
+if [ -x "$SPARKLE_BIN/generate_appcast" ]; then
+  "$SPARKLE_BIN/generate_appcast" \
+    --download-url-prefix "https://github.com/TylerSimmons212/Speek/releases/download/v$VERSION/" \
+    -o "$ROOT_DIR/appcast.xml" \
+    "$BUILD_DIR"
+  echo "   appcast.xml updated (remember to commit + push it)"
+else
+  echo "   ⚠️  generate_appcast not found at $SPARKLE_BIN — skipping appcast."
+  echo "      Download from https://github.com/sparkle-project/Sparkle/releases"
+  echo "      or set SPARKLE_BIN=/path/to/sparkle/bin"
+fi
+
 echo ""
 echo "🎉 Done!"
 echo "   Distributable: $DMG_PATH"
 ls -lh "$DMG_PATH"
+echo ""
+echo "To publish v$VERSION:"
+echo "  gh release create v$VERSION $DMG_PATH --title \"Speek $VERSION\" --generate-notes"
+echo "  git add appcast.xml && git commit -m \"release: v$VERSION appcast\" && git push"

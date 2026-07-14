@@ -18,6 +18,9 @@ packages:
   DynamicNotchKit:
     url: https://github.com/MrKai77/DynamicNotchKit
     from: 1.1.0
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.9.4
 targets:
   Speek:
     type: application
@@ -29,6 +32,8 @@ targets:
         product: FluidAudio
       - package: DynamicNotchKit
         product: DynamicNotchKit
+      - package: Sparkle
+        product: Sparkle
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -42,6 +47,11 @@ targets:
         CFBundleDisplayName: Speek
         CFBundleIconName: AppIcon
         LSApplicationCategoryType: public.app-category.productivity
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
+        SUFeedURL: https://raw.githubusercontent.com/TylerSimmons212/Speek/main/appcast.xml
+        SUPublicEDKey: qEWeFK8yNh0gb7jhHr+b/dGZsFgfeanZpzEYLmkOkDM=
+        SUEnableAutomaticChecks: true
     entitlements:
       path: Speek/Resources/Speek.entitlements
       properties:
