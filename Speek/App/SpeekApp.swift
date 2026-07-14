@@ -126,19 +126,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch event {
         case .pressed:
             if toggleLocked {
-                // Press during toggle-recording ends the session.
+                // Latched recording: the decision to stop happens on RELEASE
+                // (and only for a clean press), so that using the trigger key
+                // in a chord (Fn+arrow, Right-Option+letter) mid-recording
+                // doesn't end the session.
+                return
+            }
+            pressStartTime = Date()
+            session.startRecording()
+
+        case .released(let clean):
+            if toggleLocked {
+                guard clean else { return } // chord while latched — keep going
                 toggleLocked = false
                 lastShortReleaseTime = nil
                 pressStartTime = nil
                 Task { await session.stopRecording() }
                 return
             }
-            pressStartTime = Date()
-            session.startRecording()
-        case .released:
+
             guard let pressed = pressStartTime else { return }
             pressStartTime = nil
             let duration = Date().timeIntervalSince(pressed)
+
+            guard clean else {
+                // The "hold" was actually a chord (Fn+arrow, Right-Option+E…).
+                // The user was typing, not dictating — discard the recording.
+                lastShortReleaseTime = nil
+                Task { await session.cancelRecording() }
+                return
+            }
 
             if duration >= shortTapThreshold {
                 // Genuine push-to-talk hold — stop and transcribe.

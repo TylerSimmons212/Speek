@@ -4,13 +4,30 @@ import CoreGraphics
 
 /// Listens for the configured push-to-talk key globally via a CGEventTap.
 /// Emits .pressed when the user begins holding the key, .released when they let go.
+///
+/// A release carries a `clean` flag: `false` means some other key or mouse
+/// button was pressed while the trigger modifier was held — i.e. the user was
+/// typing a chord (Fn+arrow, Right-Option+letter for a special character,
+/// Fn+click), not asking for dictation. Consumers should discard the recording
+/// for dirty releases rather than transcribing it.
+@MainActor
 final class HotkeyManager {
-    enum Event { case pressed, released }
+    enum Event: Equatable {
+        case pressed
+        case released(clean: Bool)
+    }
     let events = PassthroughSubject<Event, Never>()
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isPressed = false
+    /// True once any non-trigger key or mouse button goes down while the
+    /// trigger modifier is held. Cleared on each new press.
+    private var otherInputDuringPress = false
+    /// Recreates the tap if macOS silently disabled it and no event arrives to
+    /// trigger the in-callback re-enable path.
+    private var healthCheckTask: Task<Void, Never>?
+    private let healthCheckInterval: TimeInterval = 30
 
     /// Modifier flag that triggers push-to-talk. Defaults to Fn but is overridden
     /// from SettingsStore. For Right-Option / Right-Command, we additionally check
@@ -34,20 +51,42 @@ final class HotkeyManager {
     }
 
     func start() {
-        let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
+        // flagsChanged drives the trigger itself; keyDown and mouse-downs are
+        // observed only to mark a press "dirty" (chord detection). The tap is
+        // listen-only — nothing is consumed, every event passes through.
+        let mask: CGEventMask =
+            (1 << CGEventType.flagsChanged.rawValue) |
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.rightMouseDown.rawValue) |
+            (1 << CGEventType.otherMouseDown.rawValue)
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon!).takeUnretainedValue()
-            // macOS disables our tap if our callback is slow or under various system
-            // conditions. Re-enable so the hotkey keeps working past the first failure.
-            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                NSLog("HotkeyManager: tap disabled (\(type.rawValue)) — re-enabling.")
-                if let tap = manager.eventTap {
-                    CGEvent.tapEnable(tap: tap, enable: true)
+            // The tap's run-loop source is added to the main run loop, so this
+            // callback always executes on the main thread — safe to assume.
+            MainActor.assumeIsolated {
+                // macOS disables our tap if our callback is slow or under various
+                // system conditions. Re-enable so the hotkey keeps working past
+                // the first failure.
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    NSLog("HotkeyManager: tap disabled (\(type.rawValue)) — re-enabling.")
+                    if let tap = manager.eventTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    manager.resyncStateAfterReenable()
+                    return
                 }
-                manager.resyncStateAfterReenable()
-                return Unmanaged.passUnretained(event)
+                switch type {
+                case .flagsChanged:
+                    manager.handle(event: event)
+                case .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                    // Any other input while the trigger is held marks the press
+                    // as a chord — the release will be reported as not clean.
+                    if manager.isPressed { manager.otherInputDuringPress = true }
+                default:
+                    break
+                }
             }
-            manager.handle(event: event)
             return Unmanaged.passUnretained(event)
         }
         let opaque = Unmanaged.passUnretained(self).toOpaque()
@@ -70,9 +109,12 @@ final class HotkeyManager {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: eventTap, enable: true)
+        startHealthCheck()
     }
 
     func stop() {
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
         if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
@@ -80,6 +122,42 @@ final class HotkeyManager {
         eventTap = nil
         runLoopSource = nil
         isPressed = false
+        otherInputDuringPress = false
+    }
+
+    /// The in-callback re-enable only runs if a `tapDisabledBy*` event is
+    /// actually delivered — under some conditions (system sleep, login window,
+    /// secure input) the tap dies silently and no callback ever fires again.
+    /// This watchdog polls every `healthCheckInterval` seconds and first tries
+    /// a cheap re-enable, then a full teardown + recreate if that didn't stick.
+    private func startHealthCheck() {
+        healthCheckTask?.cancel()
+        let interval = healthCheckInterval
+        healthCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                if Task.isCancelled { return }
+                self?.checkTapHealth()
+            }
+        }
+    }
+
+    private func checkTapHealth() {
+        guard let tap = eventTap else { return }
+        guard !CGEvent.tapIsEnabled(tap: tap) else { return }
+        NSLog("HotkeyManager: health check found tap disabled — re-enabling.")
+        CGEvent.tapEnable(tap: tap, enable: true)
+        if CGEvent.tapIsEnabled(tap: tap) {
+            resyncStateAfterReenable()
+            return
+        }
+        // Re-enable didn't stick — the mach port is likely dead. Recreate from
+        // scratch. stop() cancels the watchdog task this very call is running
+        // inside (its loop exits on the next isCancelled check) and start()
+        // spawns a fresh one, so exactly one watchdog survives.
+        NSLog("HotkeyManager: re-enable failed — recreating event tap.")
+        stop()
+        start()
     }
 
     /// After the system re-enables our tap, the current modifier state may no
@@ -91,10 +169,16 @@ final class HotkeyManager {
         let flagSet = liveFlags.contains(triggerFlag)
         if flagSet && !isPressed && requiredKeyCode == nil {
             isPressed = true
+            otherInputDuringPress = false
             events.send(.pressed)
         } else if !flagSet && isPressed {
             isPressed = false
-            events.send(.released)
+            // We missed the real release edge while the tap was dead, so we
+            // can't know how stale this recording is or where focus went in
+            // the meantime. Report dirty so the session discards it instead of
+            // typing seconds-old audio into whatever is focused now.
+            events.send(.released(clean: false))
+            otherInputDuringPress = false
         }
     }
 
@@ -118,10 +202,12 @@ final class HotkeyManager {
         }
         if pressed && !isPressed {
             isPressed = true
+            otherInputDuringPress = false
             events.send(.pressed)
         } else if !pressed && isPressed {
             isPressed = false
-            events.send(.released)
+            events.send(.released(clean: !otherInputDuringPress))
+            otherInputDuringPress = false
         }
     }
 }
