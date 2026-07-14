@@ -16,16 +16,28 @@ struct OnboardingView: View {
     /// hotkey event tap here (creating it earlier would itself trigger the
     /// Input Monitoring prompt before the user asked for it).
     let onPermissionsGranted: () -> Void
+    /// Attempts the event-tap creation. This — not IOHIDRequestAccess — is
+    /// what reliably registers the app in the Input Monitoring list in
+    /// System Settings, so the Grant button triggers it deliberately.
+    let onRequestInputMonitoring: () -> Void
+    /// Brings the onboarding window back to front — called when a permission
+    /// flips to granted so the user lands back in the flow instead of being
+    /// stranded in System Settings or behind a dismissed dialog.
+    let onRefocus: () -> Void
     let onFinish: () -> Void
 
     @State private var step: Step = .welcome
     @State private var playgroundText = ""
     @State private var tryoutSucceeded = false
-    @State private var refreshTimer: Timer?
-    /// Tracks rows whose system prompt was already requested once — a second
-    /// click falls through to opening System Settings directly (the OS won't
-    /// re-show a dismissed prompt).
-    @State private var requestedOnce: Set<String> = []
+    /// When each row's prompt was first requested. Drives second-click
+    /// behavior (deep-link to System Settings) and the stuck-state hints.
+    @State private var requestedAt: [String: Date] = [:]
+    @State private var now = Date()
+
+    private let refreshTick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    /// How long after a Grant click before we surface "still not detected"
+    /// recovery guidance under the row.
+    private let stuckHintDelay: TimeInterval = 8
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,21 +49,27 @@ struct OnboardingView: View {
                 .padding(16)
         }
         .frame(width: 620, height: 520)
-        .onAppear {
+        .onAppear { perms.refresh() }
+        .onReceive(refreshTick) { date in
+            now = date
             perms.refresh()
-            refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-                Task { @MainActor in PermissionsCoordinator.shared.refresh() }
-            }
-        }
-        .onDisappear {
-            refreshTimer?.invalidate()
-            refreshTimer = nil
         }
         .onChange(of: session.state) { _, newState in
             // A dictation completed while the playground step is up → success.
             if step == .tryout, newState == .inserting || newState == .copied {
                 tryoutSucceeded = true
             }
+        }
+        // Whenever a permission lands, pull the user back into the flow —
+        // they're otherwise stranded in System Settings or behind a dialog.
+        .onChange(of: perms.hasMic) { _, granted in
+            if granted, step == .permissions { onRefocus() }
+        }
+        .onChange(of: perms.hasInputMonitoring) { _, granted in
+            if granted, step == .permissions { onRefocus() }
+        }
+        .onChange(of: perms.hasAccessibility) { _, granted in
+            if granted, step == .permissions { onRefocus() }
         }
     }
 
@@ -95,14 +113,22 @@ struct OnboardingView: View {
                 icon: "mic.fill",
                 granted: perms.hasMic,
                 required: true,
-                detail: "Captures your voice for on-device transcription."
+                detail: "Captures your voice for on-device transcription.",
+                hint: stuckHint(
+                    key: "mic",
+                    granted: perms.hasMic,
+                    text: "Not detected? Open System Settings → Privacy & Security → Microphone and enable Speek."
+                )
             ) {
+                markRequested("mic")
                 Task {
                     // The native dialog resolves the await; only fall back to
                     // System Settings if the user previously denied (the OS
-                    // won't re-show the dialog then).
+                    // won't re-show the dialog then). Either way, come back.
                     await PermissionsCoordinator.shared.requestMic()
-                    if !PermissionsCoordinator.shared.hasMic {
+                    if PermissionsCoordinator.shared.hasMic {
+                        onRefocus()
+                    } else {
                         PermissionsCoordinator.shared.openSystemSettings(.microphone)
                     }
                 }
@@ -112,11 +138,20 @@ struct OnboardingView: View {
                 icon: "keyboard",
                 granted: perms.hasInputMonitoring,
                 required: true,
-                detail: "Lets the global push-to-talk key work in any app."
+                detail: "Lets the global push-to-talk key work in any app.",
+                hint: stuckHint(
+                    key: "inputMonitoring",
+                    granted: perms.hasInputMonitoring,
+                    text: "Speek should now appear in the Input Monitoring list — toggle it on. If the list is empty, click + and add Speek from your Applications folder."
+                )
             ) {
-                if requestedOnce.insert("inputMonitoring").inserted {
-                    PermissionsCoordinator.shared.requestInputMonitoring()
-                } else {
+                let firstClick = markRequested("inputMonitoring")
+                // Attempting the event tap is what actually registers Speek
+                // in the Input Monitoring list (IOHIDRequestAccess alone
+                // often doesn't) — do both, then take the user to the pane.
+                PermissionsCoordinator.shared.requestInputMonitoring()
+                onRequestInputMonitoring()
+                if !firstClick {
                     perms.openSystemSettings(.inputMonitoring)
                 }
             }
@@ -125,11 +160,16 @@ struct OnboardingView: View {
                 icon: "accessibility",
                 granted: perms.hasAccessibility,
                 required: false,
-                detail: "Recommended — inserts text directly at your cursor and enables seamless sentence continuation."
+                detail: "Recommended — inserts text directly at your cursor and enables seamless sentence continuation.",
+                hint: stuckHint(
+                    key: "accessibility",
+                    granted: perms.hasAccessibility,
+                    text: "Toggle already on in System Settings but not detected here? That entry is stale — select Speek there, remove it with the − button, then click + and re-add Speek from Applications. (Happens after app updates.)"
+                )
             ) {
                 // The AX prompt has its own "Open System Settings" button, so
                 // never double-open; second click deep-links directly.
-                if requestedOnce.insert("accessibility").inserted {
+                if markRequested("accessibility") {
                     PermissionsCoordinator.shared.requestAccessibility()
                 } else {
                     perms.openSystemSettings(.accessibility)
@@ -137,6 +177,25 @@ struct OnboardingView: View {
             }
             Spacer()
         }
+    }
+
+    /// Records the first request time for a row; returns true on first click.
+    @discardableResult
+    private func markRequested(_ key: String) -> Bool {
+        if requestedAt[key] == nil {
+            requestedAt[key] = Date()
+            return true
+        }
+        return false
+    }
+
+    /// Recovery guidance shown under a row once a Grant click has gone
+    /// unanswered for a while — the situations where macOS leaves the user
+    /// with an empty list or a stale toggle and zero instructions.
+    private func stuckHint(key: String, granted: Bool, text: String) -> String? {
+        guard !granted, let t = requestedAt[key],
+              now.timeIntervalSince(t) > stuckHintDelay else { return nil }
+        return text
     }
 
     private var tryout: some View {
@@ -229,6 +288,7 @@ private struct OnboardingPermissionRow: View {
     let granted: Bool
     let required: Bool
     let detail: String
+    var hint: String?
     let action: () -> Void
 
     var body: some View {
@@ -252,6 +312,18 @@ private struct OnboardingPermissionRow: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let hint {
+                    Label {
+                        Text(hint)
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "lightbulb.fill")
+                    }
+                    .foregroundStyle(.orange)
+                    .padding(.top, 4)
+                    .transition(.opacity)
+                }
             }
             Spacer()
             if granted {
@@ -264,6 +336,8 @@ private struct OnboardingPermissionRow: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.4)))
+        .animation(.easeInOut(duration: 0.2), value: hint != nil)
+        .animation(.easeInOut(duration: 0.2), value: granted)
     }
 }
 
@@ -278,6 +352,12 @@ final class OnboardingWindowController {
     init(session: DictationSession, onPermissionsGranted: @escaping () -> Void) {
         self.session = session
         self.onPermissionsGranted = onPermissionsGranted
+    }
+
+    /// Re-fronts the wizard (used when a permission grant lands while the
+    /// user is off in System Settings).
+    private func refocus() {
+        show()
     }
 
     func show() {
@@ -295,6 +375,11 @@ final class OnboardingWindowController {
                 rootView: OnboardingView(
                     session: session,
                     onPermissionsGranted: onPermissionsGranted,
+                    // Same closure: attempting the tap start both registers
+                    // Speek in the Input Monitoring list and, once granted,
+                    // just works. Idempotent (HotkeyManager guards doubles).
+                    onRequestInputMonitoring: onPermissionsGranted,
+                    onRefocus: { [weak self] in self?.refocus() },
                     onFinish: { [weak self] in
                         SettingsStore.shared.onboardingCompleted = true
                         self?.window?.close()

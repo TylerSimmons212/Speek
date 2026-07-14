@@ -51,6 +51,9 @@ final class HotkeyManager {
     }
 
     func start() {
+        // Idempotent: callers may retry start() after permission grants
+        // (onboarding does). A live tap must not be doubled.
+        guard eventTap == nil else { return }
         // flagsChanged drives the trigger itself; keyDown and mouse-downs are
         // observed only to mark a press "dirty" (chord detection). The tap is
         // listen-only — nothing is consumed, every event passes through.
