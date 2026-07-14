@@ -30,6 +30,9 @@ final class DictationSession: ObservableObject {
     private var samples: [Float] = []
     private var captureTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
+    /// Focused-field snapshot taken at recording start — feeds field context
+    /// into the pipeline and enables in-place seam repair at insertion.
+    private var fieldSnapshot: FieldSnapshot?
     /// Seconds between live-preview decodes. Each tick re-transcribes the
     /// whole buffer; on the ANE this is fast enough that a fixed cadence
     /// works, and because the decode happens inline in the loop, a slow
@@ -60,6 +63,9 @@ final class DictationSession: ObservableObject {
         samples = []
         audioLevel = 0
         partialText = ""
+        // Snapshot the focused field NOW — this is where the user's caret is;
+        // by insertion time the pipeline needs to have formatted against it.
+        fieldSnapshot = FieldContextReader.capture()
         if SettingsStore.shared.livePreviewEnabled {
             startPreviewLoop()
         }
@@ -129,10 +135,16 @@ final class DictationSession: ObservableObject {
 
         do {
             let raw = try await transcriber.transcribe(samples: samples)
-            let formatted = await pipeline.run(raw)
+            let output = await pipeline.run(raw, context: fieldSnapshot?.polishContext)
             partialText = ""
             state = .inserting
-            let result = try await injector.insert(formatted)
+            let result: InjectionResult
+            if let contextInjector = injector as? ContextAwareInjector {
+                result = try await contextInjector.insert(output, snapshot: fieldSnapshot)
+            } else {
+                result = try await injector.insert(output.text)
+            }
+            fieldSnapshot = nil
             if result == .copied {
                 // No editable target — show the user a "Copied" hint briefly
                 // so they know to paste it themselves.
@@ -142,7 +154,7 @@ final class DictationSession: ObservableObject {
             } else {
                 // Inserted in-place: watch for the user fixing a word so we can
                 // auto-learn the corrected spelling.
-                CorrectionLearner.shared.recordInsertion(insertedText: formatted)
+                CorrectionLearner.shared.recordInsertion(insertedText: output.text)
                 state = .idle
             }
         } catch {
@@ -165,6 +177,7 @@ final class DictationSession: ObservableObject {
         previewTask = nil
         samples = []
         partialText = ""
+        fieldSnapshot = nil
         state = .idle
     }
 

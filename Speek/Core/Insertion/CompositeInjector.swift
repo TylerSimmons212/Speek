@@ -3,7 +3,7 @@ import ApplicationServices
 import Foundation
 import os
 
-final class CompositeInjector: TextInjector {
+final class CompositeInjector: TextInjector, ContextAwareInjector {
     private let primary: TextInjector
     private let fallback: TextInjector
     private let log = Logger(subsystem: "com.tylersimmons.speek", category: "injection")
@@ -14,6 +14,10 @@ final class CompositeInjector: TextInjector {
     }
 
     func insert(_ text: String) async throws -> InjectionResult {
+        try await insertCore(text, adjustToContext: true)
+    }
+
+    private func insertCore(_ text: String, adjustToContext: Bool) async throws -> InjectionResult {
         // Wake up the front app's AX tree if it's an Electron/Chromium host —
         // their accessibility trees are dormant by default and refuse to
         // expose text-input roles until we set these attributes.
@@ -45,10 +49,13 @@ final class CompositeInjector: TextInjector {
             return .copied
         }
 
-        let context = Self.fieldContextBeforeCursor()
-        // Case first (needs the text's first letter), then space.
-        var adjusted = Self.smartCased(text, afterMeaningful: context.lastMeaningful)
-        adjusted = Self.smartSpaced(adjusted, afterPrevious: context.immediate)
+        var adjusted = text
+        if adjustToContext {
+            let context = Self.fieldContextBeforeCursor()
+            // Case first (needs the text's first letter), then space.
+            adjusted = Self.smartCased(text, afterMeaningful: context.lastMeaningful)
+            adjusted = Self.smartSpaced(adjusted, afterPrevious: context.immediate)
+        }
 
         let useAX = await MainActor.run { SettingsStore.shared.axInsertionEnabled }
         let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -65,6 +72,111 @@ final class CompositeInjector: TextInjector {
             log.debug("AX skipped for known-bad bundle \(frontmostBundleID ?? "?") — using synthesized keystrokes")
         }
         return try await fallback.insert(adjusted)
+    }
+
+    // MARK: - Context-aware insertion (seam repair)
+
+    /// Applies a context-merged pipeline output.
+    /// - Fragment unchanged in the merged text → insert only the continuation,
+    ///   verbatim (the model already handled spacing and casing at the seam).
+    /// - Fragment corrected → replace the fragment span in place, bounded to
+    ///   the current sentence.
+    /// - Anything unsafe (field changed, AX refused, verification failed) →
+    ///   fall back to plain insertion of the regex-formatted dictation.
+    func insert(_ output: FormattingPipeline.Output, snapshot: FieldSnapshot?) async throws -> InjectionResult {
+        guard output.mergedFragment, let snapshot, !snapshot.fragment.isEmpty else {
+            return try await insert(output.text)
+        }
+        if let suffix = Self.suffixAfterFragment(fragment: snapshot.fragment, merged: output.text) {
+            // Model kept the fragment verbatim — just append the continuation.
+            let trimmed = suffix
+            guard !trimmed.isEmpty else { return .inserted } // nothing new to add
+            log.debug("seam: fragment unchanged — inserting continuation only")
+            return try await insertCore(trimmed, adjustToContext: false)
+        }
+        if Self.replaceFragment(snapshot: snapshot, with: output.text) {
+            log.debug("seam: fragment corrected — replaced in place")
+            return .inserted
+        }
+        log.debug("seam: repair unavailable — plain insertion fallback")
+        return try await insert(output.plainFallback)
+    }
+
+    /// If `merged` starts with the fragment (exactly, or modulo trailing
+    /// whitespace normalization), returns the continuation after it.
+    static func suffixAfterFragment(fragment: String, merged: String) -> String? {
+        if merged.hasPrefix(fragment) {
+            return String(merged.dropFirst(fragment.count))
+        }
+        let trimmed = String(fragment.reversed().drop(while: { $0.isWhitespace }).reversed())
+        if !trimmed.isEmpty, merged.hasPrefix(trimmed) {
+            return String(merged.dropFirst(trimmed.count))
+        }
+        return nil
+    }
+
+    /// Replaces the snapshot's fragment span with the merged sentence, in
+    /// place, via AX selection. Every step is guarded; any failure restores
+    /// the caret and returns false so the caller can fall back safely.
+    private static func replaceFragment(snapshot: FieldSnapshot, with merged: String) -> Bool {
+        // Apps that lie about AX writes (Messages) can't be trusted with a
+        // destructive span replacement — verification reads their mirror
+        // store, not the visible composer.
+        if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           axBlacklistedBundleIDs.contains(bundle) { return false }
+
+        // The field must be exactly as we snapshotted it: same prefix, caret
+        // still sitting at the end of it, no selection.
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(snapshot.element, kAXValueAttribute as CFString, &valueRef) == .success,
+              let value = valueRef as? String, value.hasPrefix(snapshot.prefix) else { return false }
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(snapshot.element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rr = rangeRef else { return false }
+        var selection = CFRange(location: 0, length: 0)
+        guard AXValueGetValue(rr as! AXValue, .cfRange, &selection),
+              selection.length == 0,
+              selection.location == snapshot.prefixUTF16Length else { return false }
+
+        let fragmentLength = snapshot.fragment.utf16.count
+        let location = snapshot.prefixUTF16Length - fragmentLength
+        guard location >= 0, fragmentLength > 0 else { return false }
+
+        // Select the fragment span.
+        var span = CFRange(location: location, length: fragmentLength)
+        guard let axSpan = AXValueCreate(.cfRange, &span),
+              AXUIElementSetAttributeValue(snapshot.element, kAXSelectedTextRangeAttribute as CFString, axSpan) == .success else {
+            return false
+        }
+
+        // From here on, a failure leaves the fragment selected — restore the
+        // caret so a fallback insertion can't overwrite the user's text.
+        func restoreCaretAndFail() -> Bool {
+            var caret = CFRange(location: snapshot.prefixUTF16Length, length: 0)
+            if let axCaret = AXValueCreate(.cfRange, &caret) {
+                AXUIElementSetAttributeValue(snapshot.element, kAXSelectedTextRangeAttribute as CFString, axCaret)
+            }
+            return false
+        }
+
+        guard AXUIElementSetAttributeValue(snapshot.element, kAXSelectedTextAttribute as CFString, merged as CFTypeRef) == .success else {
+            return restoreCaretAndFail()
+        }
+
+        // Verify the write actually landed where we aimed it.
+        var afterRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(snapshot.element, kAXValueAttribute as CFString, &afterRef) == .success,
+              let after = afterRef as? String else { return restoreCaretAndFail() }
+        let prefixUnits = Array(snapshot.prefix.utf16)
+        let keptPrefix = String(decoding: prefixUnits[0..<location], as: UTF16.self)
+        guard after.hasPrefix(keptPrefix + merged) else { return restoreCaretAndFail() }
+
+        // Park the caret at the end of the merged sentence.
+        var caret = CFRange(location: location + merged.utf16.count, length: 0)
+        if let axCaret = AXValueCreate(.cfRange, &caret) {
+            AXUIElementSetAttributeValue(snapshot.element, kAXSelectedTextRangeAttribute as CFString, axCaret)
+        }
+        return true
     }
 
     /// Bundle identifiers where AX reports a "successful" write but the visible

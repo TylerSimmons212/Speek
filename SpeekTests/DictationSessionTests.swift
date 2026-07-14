@@ -32,7 +32,9 @@ actor StubTranscriber: TranscriptionEngine {
 
 actor NoopPolish: PolishStage {
     var isAvailable: Bool { false }
-    func run(_ input: String) async -> String { input }
+    func run(_ input: String, context: PolishContext?) async -> PolishResult {
+        PolishResult(text: input, mergedFragment: false)
+    }
 }
 
 final class CapturingInjector: TextInjector, @unchecked Sendable {

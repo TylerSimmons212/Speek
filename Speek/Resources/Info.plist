@@ -26,6 +26,8 @@
 	<string>public.app-category.productivity</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Speek pauses your music while you dictate and resumes it afterward.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speek transcribes your dictation locally on this Mac.</string>
 	<key>NSPrincipalClass</key>

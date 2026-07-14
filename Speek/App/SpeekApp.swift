@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController?
     private var overlay: RecordingOverlayWindow?
     private var notchOverlay: NotchOverlayController?
+    private var onboarding: OnboardingWindowController?
     private var cancellables = Set<AnyCancellable>()
     /// Press timestamp for the current key press, used to classify hold vs tap.
     private var pressStartTime: Date?
@@ -100,6 +101,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Start Sparkle's background update-check cycle.
         _ = UpdaterService.shared
+
+        // Pause music while recording; resume the moment recording ends
+        // (processing/inserting don't need silence).
+        session.$state
+            .removeDuplicates()
+            .sink { state in
+                if state == .recording {
+                    MediaPauseService.shared.pausePlayingApps()
+                } else {
+                    MediaPauseService.shared.resumePausedApps()
+                }
+            }
+            .store(in: &cancellables)
+
+        // First-run onboarding.
+        if !SettingsStore.shared.onboardingCompleted {
+            onboarding = OnboardingWindowController(session: session)
+            onboarding?.show()
+        }
 
         // Swap the overlay live when the user changes the style in Settings.
         SettingsStore.shared.$overlayStyle

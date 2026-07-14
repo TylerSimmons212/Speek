@@ -51,5 +51,7 @@ actor StubPolish: PolishStage {
         self._isAvailable = isAvailable
     }
     var isAvailable: Bool { _isAvailable }
-    func run(_ input: String) async -> String { transform(input) }
+    func run(_ input: String, context: PolishContext?) async -> PolishResult {
+        PolishResult(text: transform(input), mergedFragment: !(context?.fragment.isEmpty ?? true))
+    }
 }

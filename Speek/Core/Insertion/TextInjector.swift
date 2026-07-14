@@ -14,6 +14,13 @@ protocol TextInjector: Sendable {
     func insert(_ text: String) async throws -> InjectionResult
 }
 
+/// Injectors that can apply a context-merged pipeline output: appending just
+/// the continuation when the field's fragment survived unchanged, or
+/// repairing the seam in place when the model corrected it.
+protocol ContextAwareInjector: TextInjector {
+    func insert(_ output: FormattingPipeline.Output, snapshot: FieldSnapshot?) async throws -> InjectionResult
+}
+
 enum InjectionError: Error {
     case unsupportedTarget
     case clipboardFailed

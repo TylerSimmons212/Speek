@@ -68,6 +68,14 @@ final class SettingsStore: ObservableObject {
     @Published var learnFromCorrections: Bool {
         didSet { sync.setBool(learnFromCorrections, forKey: "learnFromCorrections") }
     }
+    /// Pause Music/Spotify while recording; resume after. On by default.
+    @Published var pauseMediaWhileDictating: Bool {
+        didSet { sync.setBool(pauseMediaWhileDictating, forKey: "pauseMedia") }
+    }
+    /// First-run onboarding has been completed (or skipped).
+    @Published var onboardingCompleted: Bool {
+        didSet { sync.setBool(onboardingCompleted, forKey: "onboardingCompleted") }
+    }
 
     private let sync: SyncStore
     init(sync: SyncStore = SyncStore()) {
@@ -98,6 +106,10 @@ final class SettingsStore: ObservableObject {
         self.learnFromCorrections = sync.hasValue(forKey: "learnFromCorrections")
             ? sync.bool(forKey: "learnFromCorrections")
             : true
+        self.pauseMediaWhileDictating = sync.hasValue(forKey: "pauseMedia")
+            ? sync.bool(forKey: "pauseMedia")
+            : true
+        self.onboardingCompleted = sync.bool(forKey: "onboardingCompleted")
     }
 }
 

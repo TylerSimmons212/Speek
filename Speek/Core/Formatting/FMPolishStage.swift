@@ -1,11 +1,27 @@
 import FoundationModels
 import Foundation
 
+/// Field context handed to a polish stage: what already sits before the
+/// cursor, split into read-only context and the rewriteable sentence fragment.
+struct PolishContext: Sendable, Equatable {
+    /// Earlier text — tone/reference only, must never appear in the output.
+    var preceding: String
+    /// The unfinished sentence immediately before the cursor.
+    var fragment: String
+}
+
+struct PolishResult: Sendable, Equatable {
+    var text: String
+    /// True when `text` is the merged current sentence (fragment included,
+    /// possibly corrected) rather than plain text to insert at the cursor.
+    var mergedFragment: Bool
+}
+
 /// Abstraction over the polish stage so the pipeline can be tested with stubs.
 /// FMPolishStage is the production implementation backed by Apple Foundation Models.
 protocol PolishStage: Sendable, Actor {
     var isAvailable: Bool { get async }
-    func run(_ input: String) async -> String
+    func run(_ input: String, context: PolishContext?) async -> PolishResult
 }
 
 /// LLM polish stage. Sends rule-cleaned text to the on-device 3B Foundation Models
@@ -61,7 +77,13 @@ actor FMPolishStage: PolishStage {
         return trimmedOutput
     }
 
-    func run(_ input: String) async -> String {
+    /// Apple FM path ignores field context (its guided-generation prompt is
+    /// fixed); it cleans the dictation standalone and never merges fragments.
+    func run(_ input: String, context: PolishContext?) async -> PolishResult {
+        PolishResult(text: await runPlain(input), mergedFragment: false)
+    }
+
+    private func runPlain(_ input: String) async -> String {
         guard !input.isEmpty else { return input }
         let enabled = await MainActor.run { SettingsStore.shared.polishEngine == .appleIntelligence }
         guard enabled else {

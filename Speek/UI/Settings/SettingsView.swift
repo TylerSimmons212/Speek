@@ -227,6 +227,17 @@ private struct AudioPane: View {
 
     var body: some View {
         Form {
+            Section("While dictating") {
+                Toggle(isOn: $settings.pauseMediaWhileDictating) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Pause music while dictating").font(.body.weight(.medium))
+                        Text("Pauses Music or Spotify when you start talking and resumes when you finish. macOS will ask once for permission to control each player.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
             Section("Microphone") {
                 Picker("Input device", selection: $settings.micDeviceID) {
                     Text("System default").tag("default")
