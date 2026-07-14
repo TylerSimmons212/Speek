@@ -3,6 +3,14 @@
     <channel>
         <title>Speek</title>
         <item>
+            <title>1.1.1</title>
+            <pubDate>Tue, 14 Jul 2026 13:12:33 -0700</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>1.1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.1.1/Speek.dmg" length="6567601" type="application/octet-stream" sparkle:edSignature="A9cGGtt5IwBay3L/ecpSLNeDFpguWRn2HnbDBosDxsWtEdLBn0v3pvHSRJzqHIqfoGDQOsX7sNz/IX8THFeVBw=="/>
+        </item>
+        <item>
             <title>1.1.0</title>
             <pubDate>Tue, 14 Jul 2026 12:33:38 -0700</pubDate>
             <sparkle:version>2</sparkle:version>
