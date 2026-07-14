@@ -19,10 +19,23 @@ final class CompositeInjector: TextInjector {
         // expose text-input roles until we set these attributes.
         Self.coaxFrontmostAppAX()
 
-        // If the focused element doesn't look like a text input — no focus at
-        // all, or focus is on a Finder window / button / sidebar — skip the
-        // paste path entirely.
-        guard Self.isFocusedElementTextEditable() else {
+        switch Self.focusedElementVerdict() {
+        case .editable:
+            break // continue to the AX → keystroke insertion flow below
+
+        case .opaqueApp:
+            // The focused app refuses to answer accessibility queries at all
+            // (dormant/none Electron tree, some cross-platform toolkits). We
+            // can't know what's focused — but the user pressed the hotkey
+            // with a caret somewhere, and synthesized keystrokes don't need
+            // the AX tree. Type directly rather than punting to the clipboard.
+            log.debug("focused app is AX-opaque — typing keystrokes directly")
+            return try await fallback.insert(text)
+
+        case .notEditable:
+            // AX answered and the focus is genuinely not a text input — a
+            // button, a Finder window, a read-only view. Typing here would
+            // spray keystrokes into shortcut handlers; copy instead.
             log.debug("no text-editable focused; copying to clipboard only")
             let pb = NSPasteboard.general
             pb.clearContents()
@@ -72,8 +85,18 @@ final class CompositeInjector: TextInjector {
         return " " + text
     }
 
-    /// True when the focused element looks like a text input. Three signals,
-    /// in priority order:
+    /// What the accessibility system tells us about the current focus target.
+    enum FocusVerdict {
+        /// AX answered: focus is a text input — safe to insert.
+        case editable
+        /// AX answered: focus is not a text input (button, Finder, read-only).
+        case notEditable
+        /// AX refused to answer (Electron/Chromium with a dormant tree, some
+        /// cross-platform toolkits). Focus state is unknowable via AX.
+        case opaqueApp
+    }
+
+    /// Classifies the focused element. Editability signals, in priority order:
     ///   1. The role is one of the canonical text roles (TextField, TextArea,
     ///      ComboBox).
     ///   2. The subrole is SearchField or SecureTextField (subroles of
@@ -81,11 +104,25 @@ final class CompositeInjector: TextInjector {
     ///   3. `kAXSelectedTextRangeAttribute` is *settable* on the element
     ///      (gold-standard test from Apple's AX docs — true editable signal).
     /// Explicitly excludes `AXStaticText`, which is read-only.
-    private static func isFocusedElementTextEditable() -> Bool {
+    ///
+    /// The error code of the focus query matters as much as the answer:
+    /// `.noValue` means "nothing is focused" (a real answer → notEditable),
+    /// while `.cannotComplete`/`.apiDisabled`/`.notImplemented` mean the app
+    /// never responded — verified live against Electron apps whose trees stay
+    /// dormant even after the AXManualAccessibility coax (→ opaqueApp).
+    private static func focusedElementVerdict() -> FocusVerdict {
         let systemWide = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused)
-        guard err == .success, let element = focused else { return false }
+        switch err {
+        case .success:
+            break
+        case .noValue, .attributeUnsupported:
+            return .notEditable
+        default:
+            return .opaqueApp
+        }
+        guard let element = focused else { return .notEditable }
         // swiftlint:disable:next force_cast
         let axElement = element as! AXUIElement
 
@@ -95,14 +132,14 @@ final class CompositeInjector: TextInjector {
         let role = roleRef as? String
 
         // Hard exclude: read-only static text is never a target.
-        if role == (kAXStaticTextRole as String) { return false }
+        if role == (kAXStaticTextRole as String) { return .notEditable }
 
         let textRoles: Set<String> = [
             kAXTextFieldRole as String,
             kAXTextAreaRole as String,
             kAXComboBoxRole as String
         ]
-        if let role, textRoles.contains(role) { return true }
+        if let role, textRoles.contains(role) { return .editable }
 
         var subroleRef: CFTypeRef?
         AXUIElementCopyAttributeValue(axElement, kAXSubroleAttribute as CFString, &subroleRef)
@@ -111,7 +148,7 @@ final class CompositeInjector: TextInjector {
                 kAXSearchFieldSubrole as String,
                 kAXSecureTextFieldSubrole as String
             ]
-            if textSubroles.contains(subrole) { return true }
+            if textSubroles.contains(subrole) { return .editable }
         }
 
         // Gold-standard editable test: is `kAXSelectedTextRangeAttribute`
@@ -124,9 +161,9 @@ final class CompositeInjector: TextInjector {
             kAXSelectedTextRangeAttribute as CFString,
             &settable
         )
-        if settableErr == .success && settable.boolValue { return true }
+        if settableErr == .success && settable.boolValue { return .editable }
 
-        return false
+        return .notEditable
     }
 
     /// Electron and Chromium-based apps keep their AX trees dormant by
