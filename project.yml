@@ -24,6 +24,9 @@ targets:
     dependencies:
       - package: FluidAudio
         product: FluidAudio
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Speek/Resources/Info.plist
       properties:
@@ -32,6 +35,8 @@ targets:
         NSPrincipalClass: NSApplication
         CFBundleName: Speek
         CFBundleDisplayName: Speek
+        CFBundleIconName: AppIcon
+        LSApplicationCategoryType: public.app-category.productivity
     entitlements:
       path: Speek/Resources/Speek.entitlements
       properties:
