@@ -64,7 +64,14 @@ struct OnboardingView: View {
         // are in — refocusing on every individual grant yanks them out of
         // System Settings while they're still mid-flow granting the next one.
         .onChange(of: requiredPermissionsGranted) { _, allGranted in
-            if allGranted, step == .permissions { onRefocus() }
+            if allGranted, step == .permissions {
+                DragAuthorizePanelController.shared.hide()
+                onRefocus()
+            }
+        }
+        // Leaving the permissions step retires the drag card too.
+        .onChange(of: step) { _, _ in
+            DragAuthorizePanelController.shared.hide()
         }
         // Mic is the exception: its native dialog floats over our window, so
         // returning immediately after it resolves feels natural (no Settings
@@ -140,7 +147,7 @@ struct OnboardingView: View {
                 hint: stuckHint(
                     key: "inputMonitoring",
                     granted: perms.hasInputMonitoring,
-                    text: "Speek should now appear in the Input Monitoring list — toggle it on. If the list is empty, click + and add Speek from your Applications folder."
+                    text: "Speek should now appear in the Input Monitoring list — toggle it on. If it's missing, drag the floating Speek icon into the list."
                 )
             ) {
                 let firstClick = markRequested("inputMonitoring")
@@ -151,6 +158,7 @@ struct OnboardingView: View {
                 onRequestInputMonitoring()
                 if !firstClick {
                     perms.openSystemSettings(.inputMonitoring)
+                    DragAuthorizePanelController.shared.show()
                 }
             }
             OnboardingPermissionRow(
@@ -162,7 +170,7 @@ struct OnboardingView: View {
                 hint: stuckHint(
                     key: "accessibility",
                     granted: perms.hasAccessibility,
-                    text: "Toggle already on in System Settings but not detected here? That entry is stale — select Speek there, remove it with the − button, then click + and re-add Speek from Applications. (Happens after app updates.)"
+                    text: "Toggle already on in System Settings but not detected here? That entry is stale — drag the floating Speek icon into the list to replace it. (Happens after app updates.)"
                 )
             ) {
                 // The AX prompt has its own "Open System Settings" button, so
@@ -171,6 +179,7 @@ struct OnboardingView: View {
                     PermissionsCoordinator.shared.requestAccessibility()
                 } else {
                     perms.openSystemSettings(.accessibility)
+                    DragAuthorizePanelController.shared.show()
                 }
             }
             Spacer()
