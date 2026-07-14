@@ -5,14 +5,19 @@ import ServiceManagement
 @MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
-    enum HotkeyChoice: String { case fn, rightOption, rightCommand }
     enum HotkeyMode: String { case pushToTalk, toggle }
     enum OverlayStyle: String { case notch, bottomPill }
     enum PolishEngine: String { case off, appleIntelligence, customLLM }
     enum PolishMode: String { case whenNeeded, always }
 
-    @Published var hotkeyChoice: HotkeyChoice {
-        didSet { sync.setString(hotkeyChoice.rawValue, forKey: "hotkey") }
+    /// The dictation trigger key. Persisted as JSON; the legacy three-option
+    /// string ("hotkey" key) migrates on first read.
+    @Published var hotkeyBinding: HotkeyBinding {
+        didSet {
+            if let json = hotkeyBinding.jsonString {
+                sync.setString(json, forKey: "hotkeyBinding")
+            }
+        }
     }
     @Published var hotkeyMode: HotkeyMode {
         didSet { sync.setString(hotkeyMode.rawValue, forKey: "hotkeyMode") }
@@ -80,7 +85,15 @@ final class SettingsStore: ObservableObject {
     private let sync: SyncStore
     init(sync: SyncStore = SyncStore()) {
         self.sync = sync
-        self.hotkeyChoice = HotkeyChoice(rawValue: sync.string(forKey: "hotkey") ?? "fn") ?? .fn
+        if let json = sync.string(forKey: "hotkeyBinding"),
+           let binding = HotkeyBinding.from(jsonString: json) {
+            self.hotkeyBinding = binding
+        } else if let legacy = sync.string(forKey: "hotkey"),
+                  let migrated = HotkeyBinding.fromLegacyChoice(legacy) {
+            self.hotkeyBinding = migrated
+        } else {
+            self.hotkeyBinding = .fn
+        }
         self.hotkeyMode = HotkeyMode(rawValue: sync.string(forKey: "hotkeyMode") ?? "pushToTalk") ?? .pushToTalk
         self.micDeviceID = sync.string(forKey: "micDeviceID") ?? "default"
         self.foundationModelsEnabled = sync.bool(forKey: "fmEnabled")

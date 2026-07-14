@@ -75,18 +75,15 @@ private struct GeneralPane: View {
     var body: some View {
         Form {
             Section("Activation") {
-                Picker("Hotkey", selection: $settings.hotkeyChoice) {
-                    Text("Fn").tag(SettingsStore.HotkeyChoice.fn)
-                    Text("Right Option").tag(SettingsStore.HotkeyChoice.rightOption)
-                    Text("Right Command").tag(SettingsStore.HotkeyChoice.rightCommand)
-                }
-                LabeledContent("How it works") {
-                    Text("Hold to talk, or double-tap to latch on. Tap once more to end a latched session.")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Dictation key").font(.body.weight(.medium))
+                    HotkeyRecorderView(binding: $settings.hotkeyBinding)
+                    Text("Pick a preset or record your own — any modifier key or F13–F20 works. Hold to talk, or double-tap to latch on; tap once more to end a latched session.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                        .frame(maxWidth: 280, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                .padding(.vertical, 4)
             }
             Section("Overlay") {
                 Picker("Style", selection: $settings.overlayStyle) {

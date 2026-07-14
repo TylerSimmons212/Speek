@@ -29,26 +29,17 @@ final class HotkeyManager {
     private var healthCheckTask: Task<Void, Never>?
     private let healthCheckInterval: TimeInterval = 30
 
-    /// Modifier flag that triggers push-to-talk. Defaults to Fn but is overridden
-    /// from SettingsStore. For Right-Option / Right-Command, we additionally check
-    /// the event's key code so left/right are distinguishable (the flag bit alone
-    /// fires for either side).
-    var triggerFlag: CGEventFlags = .maskSecondaryFn
-    var requiredKeyCode: CGKeyCode? = nil
+    /// The user's trigger. Modifier bindings are matched on flagsChanged
+    /// events (flag family + hardware key code so left/right distinguish);
+    /// function-key bindings (F13–F20) are matched on keyDown/keyUp.
+    private(set) var binding: HotkeyBinding = .fn
 
-    func configure(for choice: SettingsStore.HotkeyChoice) {
-        switch choice {
-        case .fn:
-            triggerFlag = .maskSecondaryFn
-            requiredKeyCode = nil
-        case .rightOption:
-            triggerFlag = .maskAlternate
-            requiredKeyCode = 0x3D  // kVK_RightOption
-        case .rightCommand:
-            triggerFlag = .maskCommand
-            requiredKeyCode = 0x36  // kVK_RightCommand
-        }
+    func configure(binding: HotkeyBinding) {
+        self.binding = binding
     }
+
+    /// True while the event tap exists (started and not stopped).
+    var isRunning: Bool { eventTap != nil }
 
     func start() {
         // Idempotent: callers may retry start() after permission grants
@@ -60,6 +51,7 @@ final class HotkeyManager {
         let mask: CGEventMask =
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue) |
             (1 << CGEventType.otherMouseDown.rawValue)
@@ -82,7 +74,11 @@ final class HotkeyManager {
                 switch type {
                 case .flagsChanged:
                     manager.handle(event: event)
-                case .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                case .keyDown:
+                    manager.handleKey(event: event, down: true)
+                case .keyUp:
+                    manager.handleKey(event: event, down: false)
+                case .leftMouseDown, .rightMouseDown, .otherMouseDown:
                     // Any other input while the trigger is held marks the press
                     // as a chord — the release will be reported as not clean.
                     if manager.isPressed { manager.otherInputDuringPress = true }
@@ -166,15 +162,13 @@ final class HotkeyManager {
     /// After the system re-enables our tap, the current modifier state may no
     /// longer match `isPressed` (the user could be holding the hotkey already,
     /// but we missed the flagsChanged edge while disabled). Sync by inspecting
-    /// the live flag state, and synthesize a press/release if needed.
+    /// the live flag state, and synthesize a release if needed. (Function-key
+    /// bindings have no queryable "is held" state — a missed release there is
+    /// recovered by the next keyDown edge resetting `isPressed`.)
     fileprivate func resyncStateAfterReenable() {
+        guard let flag = binding.flag else { return }
         let liveFlags = CGEventSource.flagsState(.combinedSessionState)
-        let flagSet = liveFlags.contains(triggerFlag)
-        if flagSet && !isPressed && requiredKeyCode == nil {
-            isPressed = true
-            otherInputDuringPress = false
-            events.send(.pressed)
-        } else if !flagSet && isPressed {
+        if !liveFlags.contains(flag) && isPressed {
             isPressed = false
             // We missed the real release edge while the tap was dead, so we
             // can't know how stale this recording is or where focus went in
@@ -185,23 +179,25 @@ final class HotkeyManager {
         }
     }
 
+    /// flagsChanged — drives modifier bindings.
     private func handle(event: CGEvent) {
-        let flags = event.flags
-        let flagSet = flags.contains(triggerFlag)
-        // For left/right modifiers, the flag bit alone fires for either side.
-        // Disambiguate by also matching the key code on flagsChanged events.
+        guard let triggerFlag = binding.flag else {
+            // Function-key binding: a modifier press mid-dictation is chord
+            // usage, mark dirty.
+            if isPressed { otherInputDuringPress = true }
+            return
+        }
+        let flagSet = event.flags.contains(triggerFlag)
+        // The flag bit alone fires for either side (left/right); the hardware
+        // key code on the flagsChanged event disambiguates.
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let pressed: Bool
-        if let required = requiredKeyCode {
-            let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-            if flagSet && keyCode == required {
-                pressed = true
-            } else if isPressed && (!flagSet || keyCode == required) {
-                pressed = false
-            } else {
-                return
-            }
+        if flagSet && keyCode == binding.keyCode {
+            pressed = true
+        } else if isPressed && (!flagSet || keyCode == binding.keyCode) {
+            pressed = false
         } else {
-            pressed = flagSet
+            return
         }
         if pressed && !isPressed {
             isPressed = true
@@ -211,6 +207,34 @@ final class HotkeyManager {
             isPressed = false
             events.send(.released(clean: !otherInputDuringPress))
             otherInputDuringPress = false
+        }
+    }
+
+    /// keyDown/keyUp — drives function-key bindings, and chord detection for
+    /// modifier bindings.
+    fileprivate func handleKey(event: CGEvent, down: Bool) {
+        guard case .functionKey(let triggerCode) = binding else {
+            // Modifier binding: any key pressed while the trigger is held is
+            // a chord — the release will be reported dirty.
+            if down && isPressed { otherInputDuringPress = true }
+            return
+        }
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        if keyCode == triggerCode {
+            if down {
+                // Held keys autorepeat; only the first edge is a press.
+                let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+                guard !isRepeat, !isPressed else { return }
+                isPressed = true
+                otherInputDuringPress = false
+                events.send(.pressed)
+            } else if isPressed {
+                isPressed = false
+                events.send(.released(clean: !otherInputDuringPress))
+                otherInputDuringPress = false
+            }
+        } else if down && isPressed {
+            otherInputDuringPress = true
         }
     }
 }

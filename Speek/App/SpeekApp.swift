@@ -139,7 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        hotkey.configure(for: SettingsStore.shared.hotkeyChoice)
+        hotkey.configure(binding: SettingsStore.shared.hotkeyBinding)
         hotkey.events
             .sink { [weak self] event in self?.handle(event: event, session: session) }
             .store(in: &cancellables)
@@ -150,14 +150,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hotkey.start()
         }
 
-        // Re-apply the hotkey choice whenever the user changes it in Settings.
-        SettingsStore.shared.$hotkeyChoice
+        // Re-apply the hotkey binding whenever the user changes it (Settings
+        // or the onboarding hotkey step).
+        SettingsStore.shared.$hotkeyBinding
             .dropFirst()
-            .sink { [weak self] choice in
+            .removeDuplicates()
+            .sink { [weak self] binding in
                 guard let self else { return }
+                // Restart only if the tap was already live — during early
+                // onboarding it isn't yet (starts at the permissions step),
+                // and starting it here would fire the permission prompt.
+                let wasRunning = self.hotkey.isRunning
                 self.hotkey.stop()
-                self.hotkey.configure(for: choice)
-                self.hotkey.start()
+                self.hotkey.configure(binding: binding)
+                if wasRunning { self.hotkey.start() }
             }
             .store(in: &cancellables)
     }

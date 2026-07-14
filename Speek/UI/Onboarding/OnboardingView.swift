@@ -6,7 +6,7 @@ import AppKit
 /// the single best predictor that a user actually "got it".
 struct OnboardingView: View {
     enum Step: Int, CaseIterable {
-        case welcome, permissions, tryout, done
+        case welcome, permissions, hotkey, tryout, done
     }
 
     @ObservedObject var session: DictationSession
@@ -82,8 +82,31 @@ struct OnboardingView: View {
         switch step {
         case .welcome: welcome
         case .permissions: permissions
+        case .hotkey: hotkeyStep
         case .tryout: tryout
         case .done: done
+        }
+    }
+
+    private var hotkeyStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Choose your dictation key")
+                .font(.title.weight(.semibold))
+            Text("Hold it to talk; release to type. Double-tap to keep recording hands-free. Pick a preset, or record any modifier key or F13–F20 — handy if your keyboard has no Fn/Globe key.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HotkeyRecorderView(binding: $settings.hotkeyBinding)
+            HStack(spacing: 10) {
+                Text("Your key:")
+                    .foregroundStyle(.secondary)
+                Text(settings.hotkeyBinding.displayName)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary))
+            }
+            .padding(.top, 4)
+            Spacer()
         }
     }
 
@@ -212,7 +235,7 @@ struct OnboardingView: View {
             HStack(spacing: 10) {
                 Text("Click into the box, hold")
                     .foregroundStyle(.secondary)
-                Text("Fn")
+                Text(settings.hotkeyBinding.keycapLabel)
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -250,7 +273,7 @@ struct OnboardingView: View {
                 .font(.system(size: 30, weight: .semibold, design: .rounded))
             VStack(spacing: 6) {
                 Text("Speek lives in your menu bar — look for the mic icon.")
-                Text("Hold **Fn** to dictate. Double-tap it to keep recording hands-free.")
+                Text("Hold **\(settings.hotkeyBinding.keycapLabel)** to dictate. Double-tap it to keep recording hands-free.")
                 Text("Settings → Formatting lets you pick an AI polish engine.")
             }
             .font(.callout)
