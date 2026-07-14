@@ -72,7 +72,9 @@ final class SettingsWindowController {
             window.title = "Speek Settings"
             window.contentViewController = NSHostingController(rootView: SettingsView())
             window.isReleasedWhenClosed = false
-            window.center()
+            // Center on the user's active screen at creation; after that,
+            // respect wherever they drag it (standard Mac behavior).
+            window.centerOnActiveScreen()
             self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)
