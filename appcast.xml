@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Speek</title>
+        <item>
+            <title>1.1.0</title>
+            <pubDate>Tue, 14 Jul 2026 12:33:38 -0700</pubDate>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.1.0/Speek.dmg" length="6529124" type="application/octet-stream" sparkle:edSignature="zN4+YPQQAImwBKQPhZSLem4Ji/pZg+vYcGaNxp83GW/TOnUufHgibCz8Ki65srAZW9/sDnhYj+4/5nxHqJ69DA=="/>
+        </item>
+    </channel>
+</rss>
