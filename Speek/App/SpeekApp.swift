@@ -48,14 +48,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func setUp() async {
         perms.refresh()
-        if !perms.hasMic { await perms.requestMic() }
 
-        // Prompt each launch if not yet granted. The OS only shows the modal once
-        // per app version for Input Monitoring; subsequent calls no-op silently.
-        // For Accessibility, the modal re-appears whenever the process is untrusted,
-        // which is the desired behavior when the user genuinely hasn't granted it.
-        if !perms.hasAccessibility { perms.requestAccessibility() }
-        if !perms.hasInputMonitoring { perms.requestInputMonitoring() }
+        // Only auto-prompt on launch AFTER onboarding: during first run the
+        // wizard owns the permission flow — its Grant buttons trigger each
+        // prompt when the user is ready, not all three the moment the app
+        // opens. (Post-onboarding, the OS shows the Input Monitoring modal
+        // once per app version; the Accessibility modal re-appears while the
+        // process is untrusted — both desired when genuinely ungranted.)
+        if SettingsStore.shared.onboardingCompleted {
+            if !perms.hasMic { await perms.requestMic() }
+            if !perms.hasAccessibility { perms.requestAccessibility() }
+            if !perms.hasInputMonitoring { perms.requestInputMonitoring() }
+        }
 
         perms.refresh()
         NSLog("Speek permissions — mic: \(perms.hasMic), accessibility: \(perms.hasAccessibility), inputMonitoring: \(perms.hasInputMonitoring), foundationModels: \(perms.hasFoundationModels)")
@@ -115,9 +119,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        // First-run onboarding.
+        // First-run onboarding. The hotkey tap starts when the user clears
+        // the permissions step, so the tryout step actually works.
         if !SettingsStore.shared.onboardingCompleted {
-            onboarding = OnboardingWindowController(session: session)
+            onboarding = OnboardingWindowController(
+                session: session,
+                onPermissionsGranted: { [weak self] in self?.hotkey.start() }
+            )
             onboarding?.show()
         }
 
@@ -135,7 +143,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkey.events
             .sink { [weak self] event in self?.handle(event: event, session: session) }
             .store(in: &cancellables)
-        hotkey.start()
+        // Creating the CGEventTap is itself what triggers the Input Monitoring
+        // permission prompt — so during first-run onboarding, defer it until
+        // the user passes the permissions step (see callback below).
+        if SettingsStore.shared.onboardingCompleted {
+            hotkey.start()
+        }
 
         // Re-apply the hotkey choice whenever the user changes it in Settings.
         SettingsStore.shared.$hotkeyChoice

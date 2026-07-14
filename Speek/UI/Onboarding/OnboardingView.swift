@@ -12,12 +12,20 @@ struct OnboardingView: View {
     @ObservedObject var session: DictationSession
     @ObservedObject private var perms = PermissionsCoordinator.shared
     @ObservedObject private var settings = SettingsStore.shared
+    /// Fired when the user clears the permissions step — the app starts the
+    /// hotkey event tap here (creating it earlier would itself trigger the
+    /// Input Monitoring prompt before the user asked for it).
+    let onPermissionsGranted: () -> Void
     let onFinish: () -> Void
 
     @State private var step: Step = .welcome
     @State private var playgroundText = ""
     @State private var tryoutSucceeded = false
     @State private var refreshTimer: Timer?
+    /// Tracks rows whose system prompt was already requested once — a second
+    /// click falls through to opening System Settings directly (the OS won't
+    /// re-show a dismissed prompt).
+    @State private var requestedOnce: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -89,8 +97,15 @@ struct OnboardingView: View {
                 required: true,
                 detail: "Captures your voice for on-device transcription."
             ) {
-                Task { await PermissionsCoordinator.shared.requestMic() }
-                perms.openSystemSettings(.microphone)
+                Task {
+                    // The native dialog resolves the await; only fall back to
+                    // System Settings if the user previously denied (the OS
+                    // won't re-show the dialog then).
+                    await PermissionsCoordinator.shared.requestMic()
+                    if !PermissionsCoordinator.shared.hasMic {
+                        PermissionsCoordinator.shared.openSystemSettings(.microphone)
+                    }
+                }
             }
             OnboardingPermissionRow(
                 title: "Input Monitoring",
@@ -99,8 +114,11 @@ struct OnboardingView: View {
                 required: true,
                 detail: "Lets the global push-to-talk key work in any app."
             ) {
-                PermissionsCoordinator.shared.requestInputMonitoring()
-                perms.openSystemSettings(.inputMonitoring)
+                if requestedOnce.insert("inputMonitoring").inserted {
+                    PermissionsCoordinator.shared.requestInputMonitoring()
+                } else {
+                    perms.openSystemSettings(.inputMonitoring)
+                }
             }
             OnboardingPermissionRow(
                 title: "Accessibility",
@@ -109,8 +127,13 @@ struct OnboardingView: View {
                 required: false,
                 detail: "Recommended — inserts text directly at your cursor and enables seamless sentence continuation."
             ) {
-                PermissionsCoordinator.shared.requestAccessibility()
-                perms.openSystemSettings(.accessibility)
+                // The AX prompt has its own "Open System Settings" button, so
+                // never double-open; second click deep-links directly.
+                if requestedOnce.insert("accessibility").inserted {
+                    PermissionsCoordinator.shared.requestAccessibility()
+                } else {
+                    perms.openSystemSettings(.accessibility)
+                }
             }
             Spacer()
         }
@@ -190,6 +213,7 @@ struct OnboardingView: View {
                 if step == .done {
                     onFinish()
                 } else {
+                    if step == .permissions { onPermissionsGranted() }
                     step = Step(rawValue: step.rawValue + 1) ?? .done
                 }
             }
@@ -249,9 +273,11 @@ private struct OnboardingPermissionRow: View {
 final class OnboardingWindowController {
     private var window: NSWindow?
     private let session: DictationSession
+    private let onPermissionsGranted: () -> Void
 
-    init(session: DictationSession) {
+    init(session: DictationSession, onPermissionsGranted: @escaping () -> Void) {
         self.session = session
+        self.onPermissionsGranted = onPermissionsGranted
     }
 
     func show() {
@@ -266,10 +292,14 @@ final class OnboardingWindowController {
             window.titleVisibility = .hidden
             window.isReleasedWhenClosed = false
             window.contentViewController = NSHostingController(
-                rootView: OnboardingView(session: session) { [weak self] in
-                    SettingsStore.shared.onboardingCompleted = true
-                    self?.window?.close()
-                }
+                rootView: OnboardingView(
+                    session: session,
+                    onPermissionsGranted: onPermissionsGranted,
+                    onFinish: { [weak self] in
+                        SettingsStore.shared.onboardingCompleted = true
+                        self?.window?.close()
+                    }
+                )
             )
             window.center()
             self.window = window
