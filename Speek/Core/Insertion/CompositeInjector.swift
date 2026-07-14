@@ -45,8 +45,10 @@ final class CompositeInjector: TextInjector {
             return .copied
         }
 
-        let previousChar = Self.previousCharBeforeCursor()
-        let adjusted = Self.smartSpaced(text, afterPrevious: previousChar)
+        let context = Self.fieldContextBeforeCursor()
+        // Case first (needs the text's first letter), then space.
+        var adjusted = Self.smartCased(text, afterMeaningful: context.lastMeaningful)
+        adjusted = Self.smartSpaced(adjusted, afterPrevious: context.immediate)
 
         let useAX = await MainActor.run { SettingsStore.shared.axInsertionEnabled }
         let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -179,16 +181,24 @@ final class CompositeInjector: TextInjector {
         AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, true as CFTypeRef)
     }
 
-    /// Best-effort read of the character immediately before the cursor in the
-    /// focused element. Used to decide whether to prepend a space. Returns nil
-    /// if the field doesn't expose its value via AX (common in Electron/web
-    /// apps) — in that case `smartSpaced` will no-op and let the host app deal
-    /// with spacing.
-    private static func previousCharBeforeCursor() -> Character? {
+    struct FieldContext {
+        /// Character immediately before the cursor (drives smart spacing).
+        var immediate: Character?
+        /// Last "meaningful" character before the cursor — skipping back over
+        /// whitespace, newlines, and closing quotes/brackets (drives smart
+        /// casing: is the cursor mid-sentence or at a sentence start?).
+        var lastMeaningful: Character?
+    }
+
+    /// Best-effort read of the text before the cursor in the focused element.
+    /// Returns empty context if the field doesn't expose its value via AX
+    /// (common in Electron/web apps) — smartSpaced and smartCased both no-op
+    /// on nil and leave the pipeline's default formatting untouched.
+    private static func fieldContextBeforeCursor() -> FieldContext {
         let systemWide = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused)
-        guard err == .success, let element = focused else { return nil }
+        guard err == .success, let element = focused else { return FieldContext() }
         // swiftlint:disable:next force_cast
         let axElement = element as! AXUIElement
 
@@ -197,15 +207,53 @@ final class CompositeInjector: TextInjector {
         AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef)
         AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef)
 
-        guard let value = valueRef as? String, !value.isEmpty else { return nil }
+        guard let value = valueRef as? String, !value.isEmpty else { return FieldContext() }
 
         var range = CFRange(location: 0, length: 0)
         if let rangeRef = rangeRef {
             AXValueGetValue(rangeRef as! AXValue, .cfRange, &range)
         }
         let cursor = max(0, min(value.count, range.location))
-        guard cursor > 0 else { return nil }
-        let prevIndex = value.index(value.startIndex, offsetBy: cursor - 1)
-        return value[prevIndex]
+        guard cursor > 0 else { return FieldContext() }
+        let prefix = String(value.prefix(cursor))
+        return contextFrom(prefix: prefix)
+    }
+
+    /// Derives the field context from the text before the cursor. Split out
+    /// from the AX read so it's unit-testable.
+    static func contextFrom(prefix: String) -> FieldContext {
+        guard let immediate = prefix.last else { return FieldContext() }
+        // Scan back past whitespace and closing punctuation to the character
+        // that actually determines sentence position: `he said "stop."` — the
+        // quote is skipped so the period drives capitalization; `(like this)`
+        // — the paren is skipped so the 's' marks a mid-sentence continuation.
+        let closers: Set<Character> = ["\"", "'", "\u{201D}", "\u{2019}", ")", "]", "}"]
+        let meaningful = prefix.reversed().first { !$0.isWhitespace && !$0.isNewline && !closers.contains($0) }
+        return FieldContext(immediate: immediate, lastMeaningful: meaningful)
+    }
+
+    /// Lowercases the insert's first letter when the cursor sits mid-sentence
+    /// (the effective previous character isn't a sentence ender). The regex
+    /// and LLM stages always capitalize their output as a standalone sentence;
+    /// this reconciles that with the surrounding text so continuations read
+    /// seamlessly ("and then we went to" + "the store" — not "The store").
+    ///
+    /// Guards: "I" and its contractions stay capitalized, as do words with
+    /// interior capitals (acronyms like PDF, names like McDonald). Plain
+    /// proper nouns can't be distinguished cheaply and will be lowercased —
+    /// mid-sentence continuations overwhelmingly start with common words, so
+    /// this trades a rare miss for the common case.
+    static func smartCased(_ text: String, afterMeaningful previous: Character?) -> String {
+        guard let previous else { return text }               // empty/unreadable field
+        if ".!?…".contains(previous) || previous.isNewline { return text } // sentence start
+        guard let first = text.first, first.isUppercase else { return text }
+
+        let firstWord = text.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        // "I", "I'm", "I'll", "I've", "I'd" stay capitalized.
+        if firstWord == "I" || firstWord.hasPrefix("I'") || firstWord.hasPrefix("I\u{2019}") { return text }
+        // Interior capitals → acronym or proper name, leave alone.
+        if firstWord.dropFirst().contains(where: { $0.isUppercase }) { return text }
+
+        return first.lowercased() + text.dropFirst()
     }
 }
