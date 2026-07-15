@@ -16,9 +16,18 @@ final class MeetingTranscriptionService: ObservableObject {
         case failed(String)
     }
 
-    enum Speaker: String, Equatable {
-        case you = "You"
-        case them = "Them"
+    enum Speaker: Equatable {
+        case you
+        /// Remote audio; the associated value is the diarized label
+        /// ("Speaker 1") or nil when diarization is unavailable.
+        case them(String?)
+
+        var label: String {
+            switch self {
+            case .you: return "You"
+            case .them(let name): return name ?? "Them"
+            }
+        }
     }
 
     struct Segment: Identifiable, Equatable {
@@ -53,6 +62,9 @@ final class MeetingTranscriptionService: ObservableObject {
     var transcriber: (any TranscriptionEngine)?
 
     private let tap = SystemAudioTapService()
+    /// Identifies distinct remote speakers within the system-audio track.
+    private let diarizer = MeetingDiarizer()
+    private var speakerLabeler = SpeakerLabeler()
     /// Meeting-dedicated mic capture ("You" track) — a second engine
     /// instance; macOS happily feeds the mic to both this and dictation.
     private let mic = AudioCaptureService()
@@ -109,8 +121,12 @@ final class MeetingTranscriptionService: ObservableObject {
         micActivity = SpeakerAttributor.TrackActivity()
         windowStartOffset = 0
         gate = SilenceGateChunker()
+        speakerLabeler = SpeakerLabeler()
         startedAt = Date()
         state = .listening(since: startedAt)
+        // Diarization models load in the background (download on first use);
+        // early windows label as plain "Them" until ready.
+        Task { await diarizer.startSession() }
         startMicTrack()
         startPump()
         NSLog("MeetingTranscription: started")
@@ -130,6 +146,7 @@ final class MeetingTranscriptionService: ObservableObject {
         tap.stop()
         await mic.stop()
         await flushWindow()
+        await diarizer.endSession()
         state = .idle
         audioLevel = 0
         NSLog("MeetingTranscription: stopped with \(segments.count) segments")
@@ -235,7 +252,13 @@ final class MeetingTranscriptionService: ObservableObject {
         // Them first (the call audio is usually the conversational anchor),
         // then You. Sub-second windows are silence-gap artifacts — skip.
         if verdict.them, systemWindow.count >= 16_000 {
-            await appendSegment(speaker: .them, samples: systemWindow, offset: offset, transcriber: transcriber)
+            // Windows are pause-bounded and usually single-voiced; the
+            // dominant diarized speaker labels the whole segment.
+            var speaker = Speaker.them(nil)
+            if let id = await diarizer.dominantSpeakerId(in: systemWindow) {
+                speaker = .them(speakerLabeler.label(forId: id))
+            }
+            await appendSegment(speaker: speaker, samples: systemWindow, offset: offset, transcriber: transcriber)
         }
         if verdict.you, micWindow.count >= 16_000 {
             await appendSegment(speaker: .you, samples: micWindow, offset: offset, transcriber: transcriber)
@@ -254,7 +277,7 @@ final class MeetingTranscriptionService: ObservableObject {
             guard !text.isEmpty else { return }
             segments.append(Segment(offset: offset, speaker: speaker, text: text))
         } catch {
-            NSLog("MeetingTranscription: \(speaker.rawValue) chunk decode failed — \(error)")
+            NSLog("MeetingTranscription: \(speaker.label) chunk decode failed — \(error)")
         }
     }
 
@@ -273,7 +296,7 @@ final class MeetingTranscriptionService: ObservableObject {
 
         var lines = ["# Meeting Transcript — \(startedAt.formatted(date: .abbreviated, time: .shortened))", ""]
         for segment in segments {
-            lines.append("**[\(Self.timestamp(segment.offset))] \(segment.speaker.rawValue):** \(segment.text)")
+            lines.append("**[\(Self.timestamp(segment.offset))] \(segment.speaker.label):** \(segment.text)")
             lines.append("")
         }
         let body = lines.joined(separator: "\n")

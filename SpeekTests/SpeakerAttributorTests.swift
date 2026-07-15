@@ -81,4 +81,20 @@ final class SpeakerAttributorTests: XCTestCase {
         )
         XCTAssertEqual(verdict, .init(you: false, them: false))
     }
+
+    // MARK: - SpeakerLabeler
+
+    func test_labeler_assigns_ordinals_in_first_heard_order() {
+        var labeler = SpeakerLabeler()
+        XCTAssertEqual(labeler.label(forId: "spk_zz"), "Speaker 1")
+        XCTAssertEqual(labeler.label(forId: "spk_aa"), "Speaker 2")
+        XCTAssertEqual(labeler.label(forId: "spk_zz"), "Speaker 1") // stable
+        XCTAssertEqual(labeler.label(forId: "spk_mm"), "Speaker 3")
+    }
+
+    func test_speaker_labels() {
+        XCTAssertEqual(MeetingTranscriptionService.Speaker.you.label, "You")
+        XCTAssertEqual(MeetingTranscriptionService.Speaker.them(nil).label, "Them")
+        XCTAssertEqual(MeetingTranscriptionService.Speaker.them("Speaker 2").label, "Speaker 2")
+    }
 }
