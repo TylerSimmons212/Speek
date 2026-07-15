@@ -90,7 +90,7 @@ private struct GeneralPane: View {
                     Text("Notch (Dynamic Island)").tag(SettingsStore.OverlayStyle.notch)
                     Text("Bottom pill").tag(SettingsStore.OverlayStyle.bottomPill)
                 }
-                Text("Notch style expands out of the MacBook notch — on screens without a notch it floats at the top center.")
+                Text("Notch style expands out of the MacBook notch. Screens without one get a mini virtual notch that appears only while Speek is active.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Toggle("Show live transcript while dictating", isOn: $settings.livePreviewEnabled)

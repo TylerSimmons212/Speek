@@ -20,9 +20,12 @@ final class MeetingIndicatorController {
     init(service: MeetingTranscriptionService, session: DictationSession) {
         self.service = service
         self.session = session
+        // Forced .notch: flat screens get a virtual notch (see
+        // NotchOverlayController), which also makes compact mode — the
+        // outward dot+meter — work everywhere instead of hiding.
         self.notch = DynamicNotch(
             hoverBehavior: [.keepVisible, .increaseShadow],
-            style: .auto
+            style: .notch
         ) {
             MeetingIndicatorExpandedView(service: service)
         } compactLeading: {
@@ -114,9 +117,7 @@ final class MeetingIndicatorController {
 
     private func show() async {
         guard let screen = Self.targetScreen() else { return }
-        // Compact flanks the notch on notched screens; on screens without
-        // one, DynamicNotchKit hides compact-only content — acceptable, the
-        // menu bar item still shows the running state there.
+        // Compact flanks the notch — physical or virtual — on every screen.
         let exclusion = Task { await excludeFromScreenCapture() }
         await notch.compact(on: screen)
         await exclusion.value

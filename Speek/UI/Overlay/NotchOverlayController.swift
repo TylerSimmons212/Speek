@@ -18,7 +18,14 @@ final class NotchOverlayController {
         // hoverBehavior .keepVisible keeps the notch open while the mouse is
         // over it — required so the "Learned" pill's undo button is clickable
         // before the auto-hide fires.
-        self.notch = DynamicNotch(hoverBehavior: [.keepVisible], style: .auto) {
+        //
+        // Style is FORCED to .notch (not .auto): on screens without a
+        // physical notch, DynamicNotchKit synthesizes a virtual one — a
+        // 300pt menu-bar-height black tab at top center — so Mac minis,
+        // iMacs, and external displays get the identical experience. The
+        // window only exists while a feature is active, so the virtual notch
+        // vanishes completely when idle.
+        self.notch = DynamicNotch(hoverBehavior: [.keepVisible], style: .notch) {
             NotchOverlayView(session: session)
         }
 
