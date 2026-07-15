@@ -42,6 +42,7 @@ targets:
       properties:
         NSMicrophoneUsageDescription: Speek transcribes your dictation locally on this Mac.
         NSAppleEventsUsageDescription: Speek pauses your music while you dictate and resumes it afterward.
+        NSAudioCaptureUsageDescription: Speek transcribes meeting audio playing on your Mac, entirely on-device.
         LSUIElement: true
         NSPrincipalClass: NSApplication
         CFBundleName: Speek

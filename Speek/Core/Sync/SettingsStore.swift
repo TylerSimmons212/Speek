@@ -81,6 +81,10 @@ final class SettingsStore: ObservableObject {
     @Published var onboardingCompleted: Bool {
         didSet { sync.setBool(onboardingCompleted, forKey: "onboardingCompleted") }
     }
+    /// The user has seen the meeting-transcription consent note.
+    @Published var meetingConsentAcknowledged: Bool {
+        didSet { sync.setBool(meetingConsentAcknowledged, forKey: "meetingConsent") }
+    }
 
     private let sync: SyncStore
     init(sync: SyncStore = SyncStore()) {
@@ -123,6 +127,7 @@ final class SettingsStore: ObservableObject {
             ? sync.bool(forKey: "pauseMedia")
             : true
         self.onboardingCompleted = sync.bool(forKey: "onboardingCompleted")
+        self.meetingConsentAcknowledged = sync.bool(forKey: "meetingConsent")
     }
 }
 

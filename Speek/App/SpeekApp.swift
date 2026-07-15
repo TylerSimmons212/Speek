@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlay: RecordingOverlayWindow?
     private var notchOverlay: NotchOverlayController?
     private var onboarding: OnboardingWindowController?
+    private var meetingIndicator: MeetingIndicatorController?
     private var cancellables = Set<AnyCancellable>()
     /// Press timestamp for the current key press, used to classify hold vs tap.
     private var pressStartTime: Date?
@@ -102,6 +103,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         .store(in: &cancellables)
         self.menuBar = MenuBarController(session: session)
         buildOverlay(style: SettingsStore.shared.overlayStyle, session: session)
+
+        // Meeting transcription shares the Parakeet engine (the actor
+        // serializes decodes with dictation safely).
+        MeetingTranscriptionService.shared.transcriber = transcriber
+        self.meetingIndicator = MeetingIndicatorController(
+            service: MeetingTranscriptionService.shared,
+            session: session
+        )
 
         // Start Sparkle's background update-check cycle.
         _ = UpdaterService.shared

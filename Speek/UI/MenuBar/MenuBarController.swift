@@ -7,6 +7,7 @@ final class MenuBarController {
     private let statusItem: NSStatusItem
     private let settingsWindow = SettingsWindowController()
     private var cancellables = Set<AnyCancellable>()
+    private weak var meetingItem: NSMenuItem?
 
     init(session: DictationSession) {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -15,6 +16,11 @@ final class MenuBarController {
         }
 
         let menu = NSMenu()
+        let meetingItem = NSMenuItem(title: "Transcribe Meeting Audio", action: #selector(toggleMeetingTranscription), keyEquivalent: "")
+        meetingItem.target = self
+        menu.addItem(meetingItem)
+        self.meetingItem = meetingItem
+        menu.addItem(NSMenuItem.separator())
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -32,6 +38,46 @@ final class MenuBarController {
         session.$state
             .sink { [weak self] state in self?.updateIcon(for: state) }
             .store(in: &cancellables)
+
+        MeetingTranscriptionService.shared.$state
+            .sink { [weak self] state in
+                switch state {
+                case .listening:
+                    self?.meetingItem?.title = "Stop Transcribing Meeting"
+                case .idle:
+                    self?.meetingItem?.title = "Transcribe Meeting Audio"
+                case .failed(let message):
+                    self?.meetingItem?.title = "Transcribe Meeting Audio"
+                    NSLog("MeetingTranscription failed: \(message)")
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    @objc private func toggleMeetingTranscription() {
+        let service = MeetingTranscriptionService.shared
+        if service.isListening {
+            Task { @MainActor in
+                if let url = await service.stop() {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            }
+            return
+        }
+
+        // One-time consent note: a silent system-level listener makes call-
+        // recording consent entirely the user's responsibility.
+        if !SettingsStore.shared.meetingConsentAcknowledged {
+            let alert = NSAlert()
+            alert.messageText = "Transcribe meeting audio?"
+            alert.informativeText = "Speek will transcribe all audio playing on this Mac, entirely on-device — nothing leaves your computer.\n\nRecording laws vary by location: some places require everyone on a call to consent. It's your responsibility to get consent where required."
+            alert.addButton(withTitle: "Start Transcribing")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            SettingsStore.shared.meetingConsentAcknowledged = true
+        }
+        service.start()
     }
 
     private func updateIcon(for state: DictationSession.State) {

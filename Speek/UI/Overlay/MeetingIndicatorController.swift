@@ -1,0 +1,161 @@
+import AppKit
+import Combine
+import DynamicNotchKit
+import SwiftUI
+
+/// Compact recording indicator while meeting transcription runs: the notch
+/// expands slightly OUTWARD (iPhone call-indicator style) — a red dot on the
+/// leading side, a live level meter trailing. Hovering expands to show the
+/// elapsed time and a Stop button.
+///
+/// Yields to the dictation overlay (which uses the expanded notch) and
+/// returns once dictation finishes.
+@MainActor
+final class MeetingIndicatorController {
+    private let notch: DynamicNotch<MeetingIndicatorExpandedView, MeetingIndicatorDotView, MeetingIndicatorMeterView>
+    private var cancellables = Set<AnyCancellable>()
+
+    init(service: MeetingTranscriptionService, session: DictationSession) {
+        self.notch = DynamicNotch(
+            hoverBehavior: [.keepVisible, .increaseShadow],
+            style: .auto
+        ) {
+            MeetingIndicatorExpandedView(service: service)
+        } compactLeading: {
+            MeetingIndicatorDotView()
+        } compactTrailing: {
+            MeetingIndicatorMeterView(service: service)
+        }
+
+        // Show/hide with the meeting session…
+        service.$state
+            .map { state -> Bool in
+                if case .listening = state { return true }
+                return false
+            }
+            .removeDuplicates()
+            .sink { [weak self] listening in
+                guard let self else { return }
+                Task {
+                    if listening, session.state == .idle {
+                        await self.show()
+                    } else if !listening {
+                        await self.notch.hide()
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // …and yield the notch to the dictation overlay while it's active.
+        session.$state
+            .map { $0 == .idle }
+            .removeDuplicates()
+            .sink { [weak self] dictationIdle in
+                guard let self else { return }
+                Task {
+                    if dictationIdle, service.isListening {
+                        // Give the dictation overlay's collapse animation room.
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        guard service.isListening, session.state == .idle else { return }
+                        await self.show()
+                    } else if !dictationIdle {
+                        await self.notch.hide()
+                    }
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func show() async {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.screens.first
+        guard let screen else { return }
+        // Compact flanks the notch on notched screens; on screens without
+        // one, DynamicNotchKit hides compact-only content — acceptable, the
+        // menu bar item still shows the running state there.
+        await notch.compact(on: screen)
+    }
+}
+
+// MARK: - Views
+
+struct MeetingIndicatorDotView: View {
+    @State private var pulsing = false
+
+    var body: some View {
+        Circle()
+            .fill(.red)
+            .frame(width: 8, height: 8)
+            .opacity(pulsing ? 0.5 : 1)
+            .animation(.easeInOut(duration: 1).repeatForever(autoreverses: true), value: pulsing)
+            .onAppear { pulsing = true }
+            .padding(.horizontal, 2)
+    }
+}
+
+struct MeetingIndicatorMeterView: View {
+    @ObservedObject var service: MeetingTranscriptionService
+
+    var body: some View {
+        HStack(spacing: 1.5) {
+            ForEach(0..<3, id: \.self) { i in
+                let threshold = Float(i + 1) / 3
+                Capsule()
+                    .fill(.white)
+                    .frame(width: 2, height: 4 + CGFloat(min(service.audioLevel, threshold)) * 8)
+                    .opacity(service.audioLevel >= threshold * 0.4 ? 1 : 0.35)
+            }
+        }
+        .animation(.linear(duration: 0.12), value: service.audioLevel)
+        .padding(.horizontal, 2)
+    }
+}
+
+struct MeetingIndicatorExpandedView: View {
+    @ObservedObject var service: MeetingTranscriptionService
+    @State private var now = Date()
+    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Circle().fill(.red).frame(width: 9, height: 9)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Transcribing meeting")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white)
+                Text(elapsedLabel)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            Spacer(minLength: 12)
+            Button {
+                Task { @MainActor in
+                    if let url = await service.stop() {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
+            } label: {
+                Text("Stop")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(.white.opacity(0.2)))
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(width: 280)
+        .onReceive(tick) { now = $0 }
+    }
+
+    private var elapsedLabel: String {
+        MeetingTranscriptionService.timestamp(now.timeIntervalSince(
+            {
+                if case .listening(let since) = service.state { return since }
+                return now
+            }()
+        ))
+    }
+}
