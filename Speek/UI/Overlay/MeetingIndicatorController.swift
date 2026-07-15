@@ -14,8 +14,12 @@ import SwiftUI
 final class MeetingIndicatorController {
     private let notch: DynamicNotch<MeetingIndicatorExpandedView, MeetingIndicatorDotView, MeetingIndicatorMeterView>
     private var cancellables = Set<AnyCancellable>()
+    private let service: MeetingTranscriptionService
+    private let session: DictationSession
 
     init(service: MeetingTranscriptionService, session: DictationSession) {
+        self.service = service
+        self.session = session
         self.notch = DynamicNotch(
             hoverBehavior: [.keepVisible, .increaseShadow],
             style: .auto
@@ -59,21 +63,50 @@ final class MeetingIndicatorController {
                         guard service.isListening, session.state == .idle else { return }
                         await self.show()
                     } else if !dictationIdle {
+                        service.livePreviewActive = false
                         await self.notch.hide()
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // Hover: compact indicator expands downward into a live transcript
+        // (and live decoding runs only while the user is actually looking).
+        notch.$isHovering
+            .removeDuplicates()
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
+            .sink { [weak self] hovering in
+                guard let self else { return }
+                guard service.isListening, session.state == .idle else { return }
+                Task {
+                    if hovering {
+                        service.livePreviewActive = true
+                        await self.expand()
+                    } else {
+                        service.livePreviewActive = false
+                        await self.show() // back to compact
                     }
                 }
             }
             .store(in: &cancellables)
     }
 
+    private func expand() async {
+        guard let screen = Self.targetScreen() else { return }
+        await notch.expand(on: screen)
+    }
+
     private func show() async {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.screens.first
-        guard let screen else { return }
+        guard let screen = Self.targetScreen() else { return }
         // Compact flanks the notch on notched screens; on screens without
         // one, DynamicNotchKit hides compact-only content — acceptable, the
         // menu bar item still shows the running state there.
         await notch.compact(on: screen)
+    }
+
+    private static func targetScreen() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.screens.first
     }
 }
 
@@ -117,37 +150,54 @@ struct MeetingIndicatorExpandedView: View {
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        HStack(spacing: 12) {
-            Circle().fill(.red).frame(width: 9, height: 9)
-            VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Circle().fill(.red).frame(width: 9, height: 9)
                 Text("Transcribing meeting")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.white)
                 Text(elapsedLabel)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.6))
-            }
-            Spacer(minLength: 12)
-            Button {
-                Task { @MainActor in
-                    if let url = await service.stop() {
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                Spacer(minLength: 12)
+                Button {
+                    Task { @MainActor in
+                        if let url = await service.stop() {
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        }
                     }
+                } label: {
+                    Text("Stop")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(.white.opacity(0.2)))
+                        .foregroundStyle(.white)
                 }
-            } label: {
-                Text("Stop")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(.white.opacity(0.2)))
-                    .foregroundStyle(.white)
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+
+            // Live transcript: recent finished segments + the in-flight
+            // window's rolling decode. Newest words stay visible.
+            Text(recentTranscript.isEmpty ? "Listening…" : recentTranscript)
+                .font(.system(size: 12.5, weight: .regular, design: .rounded))
+                .foregroundStyle(recentTranscript.isEmpty ? .white.opacity(0.4) : .white.opacity(0.85))
+                .lineLimit(5)
+                .truncationMode(.head)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(.smooth(duration: 0.25), value: recentTranscript)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .frame(width: 280)
+        .frame(width: 380)
         .onReceive(tick) { now = $0 }
+    }
+
+    private var recentTranscript: String {
+        var parts = service.segments.suffix(2).map(\.text)
+        if !service.livePartial.isEmpty { parts.append(service.livePartial) }
+        return parts.joined(separator: " ")
     }
 
     private var elapsedLabel: String {

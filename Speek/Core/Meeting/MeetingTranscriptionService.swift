@@ -27,6 +27,21 @@ final class MeetingTranscriptionService: ObservableObject {
     @Published private(set) var segments: [Segment] = []
     /// 0…1 level of recent system audio, drives the indicator's meter.
     @Published private(set) var audioLevel: Float = 0
+    /// Rolling decode of the in-flight window — only produced while
+    /// `livePreviewActive` (the notch is expanded under the cursor), so the
+    /// ANE isn't decoding continuously for a transcript nobody is watching.
+    @Published private(set) var livePartial: String = ""
+
+    /// Set by the indicator when the user expands the notch. Toggling off
+    /// clears the preview state.
+    var livePreviewActive = false {
+        didSet {
+            guard livePreviewActive != oldValue, !livePreviewActive else { return }
+            livePartial = ""
+            partialMerger = PartialTranscriptMerger()
+        }
+    }
+    private var partialMerger = PartialTranscriptMerger()
 
     /// Set by the app once the Parakeet engine has loaded.
     var transcriber: (any TranscriptionEngine)?
@@ -102,6 +117,17 @@ final class MeetingTranscriptionService: ObservableObject {
                 self.ingestDrainedAudio()
                 if self.gate.shouldFlush(windowDuration: Double(self.window16k.count) / 16_000) {
                     await self.flushWindow()
+                } else if self.livePreviewActive, self.window16k.count >= 16_000,
+                          let transcriber = self.transcriber {
+                    // Live preview: re-decode the in-flight window; the merger
+                    // locks stable words so the display doesn't flicker. Runs
+                    // inline, so a slow decode naturally throttles the cadence
+                    // (same backpressure design as the dictation preview).
+                    let snapshot = self.window16k
+                    if let text = try? await transcriber.transcribe(samples: snapshot) {
+                        guard self.livePreviewActive else { continue }
+                        self.livePartial = self.partialMerger.merge(text)
+                    }
                 }
             }
         }
@@ -128,6 +154,10 @@ final class MeetingTranscriptionService: ObservableObject {
         let window = window16k
         window16k = []
         gate.reset()
+        // The flushed audio becomes a permanent segment — reset the preview
+        // so it starts fresh on the next window.
+        livePartial = ""
+        partialMerger = PartialTranscriptMerger()
         // Sub-second windows are silence-gap artifacts, not speech.
         guard window.count >= 16_000, let transcriber else { return }
         let offset = max(0, windowStartOffset)
