@@ -49,8 +49,8 @@ targets:
         CFBundleDisplayName: Speek
         CFBundleIconName: AppIcon
         LSApplicationCategoryType: public.app-category.productivity
-        CFBundleShortVersionString: "1.1.1"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "1.2.0"
+        CFBundleVersion: "4"
         SUFeedURL: https://raw.githubusercontent.com/TylerSimmons212/Speek/main/appcast.xml
         SUPublicEDKey: qEWeFK8yNh0gb7jhHr+b/dGZsFgfeanZpzEYLmkOkDM=
         SUEnableAutomaticChecks: true
