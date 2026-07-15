@@ -93,15 +93,23 @@ final class MeetingIndicatorController {
 
     private func expand() async {
         guard let screen = Self.targetScreen() else { return }
+        let exclusion = Task { await excludeFromScreenCapture() }
         await notch.expand(on: screen)
-        excludeFromScreenCapture()
+        await exclusion.value
     }
 
     /// The live transcript is personal content — keep it out of screen
-    /// shares and recordings. DynamicNotchKit recreates its window on each
-    /// show, so this is applied after every expand/compact.
-    private func excludeFromScreenCapture() {
-        notch.windowController?.window?.sharingType = .none
+    /// shares and recordings. The exclusion must land BEFORE the fade-in, so
+    /// this polls for the (recreated-per-show) window and flags it within
+    /// ~10ms of creation, while it's still at zero opacity.
+    private func excludeFromScreenCapture() async {
+        for _ in 0..<50 {
+            if let window = notch.windowController?.window {
+                window.sharingType = .none
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 
     private func show() async {
@@ -109,8 +117,9 @@ final class MeetingIndicatorController {
         // Compact flanks the notch on notched screens; on screens without
         // one, DynamicNotchKit hides compact-only content — acceptable, the
         // menu bar item still shows the running state there.
+        let exclusion = Task { await excludeFromScreenCapture() }
         await notch.compact(on: screen)
-        excludeFromScreenCapture()
+        await exclusion.value
     }
 
     private static func targetScreen() -> NSScreen? {

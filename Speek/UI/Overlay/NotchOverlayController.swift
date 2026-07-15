@@ -65,10 +65,25 @@ final class NotchOverlayController {
 
     private func show() async {
         guard let screen = Self.targetScreen() else { return }
+        // Exclusion must land BEFORE the window fades in (setting it after
+        // expand() returns leaves a ~0.4s window where recordings capture the
+        // overlay). Race a poll against the window's creation: it exists
+        // within milliseconds of expand() starting, still at zero opacity.
+        let exclusion = Task { await Self.excludeFromCapture(notch: notch) }
         await notch.expand(on: screen)
-        // The dictation preview is personal content — exclude it from screen
-        // shares/recordings. Reapplied per show; the window is recreated.
-        notch.windowController?.window?.sharingType = .none
+        await exclusion.value
+    }
+
+    private static func excludeFromCapture(
+        notch: DynamicNotch<NotchOverlayView, EmptyView, EmptyView>
+    ) async {
+        for _ in 0..<50 {
+            if let window = notch.windowController?.window {
+                window.sharingType = .none
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 
     private func scheduleHide(afterMs ms: UInt64) {
