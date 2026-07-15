@@ -16,10 +16,16 @@ final class MeetingTranscriptionService: ObservableObject {
         case failed(String)
     }
 
+    enum Speaker: String, Equatable {
+        case you = "You"
+        case them = "Them"
+    }
+
     struct Segment: Identifiable, Equatable {
         let id = UUID()
         /// Seconds from session start.
         let offset: TimeInterval
+        let speaker: Speaker
         let text: String
     }
 
@@ -47,9 +53,24 @@ final class MeetingTranscriptionService: ObservableObject {
     var transcriber: (any TranscriptionEngine)?
 
     private let tap = SystemAudioTapService()
+    /// Meeting-dedicated mic capture ("You" track) — a second engine
+    /// instance; macOS happily feeds the mic to both this and dictation.
+    private let mic = AudioCaptureService()
+    private var micTask: Task<Void, Never>?
+    /// Mic chunks pushed by the stream reader, drained by the pump.
+    private var micPending: [Float] = []
+    /// True while the user is dictating — their speech is going to the
+    /// dictation pipeline, not the meeting, so the You-track pauses.
+    var micSuppressed = false
+
     private var pumpTask: Task<Void, Never>?
     private var gate = SilenceGateChunker()
     private var window16k: [Float] = []
+    private var micWindow16k: [Float] = []
+    private var systemActivity = SpeakerAttributor.TrackActivity()
+    private var micActivity = SpeakerAttributor.TrackActivity()
+    /// Speech-presence threshold for attribution (RMS).
+    private let activityThreshold: Float = 0.012
     private var windowStartOffset: TimeInterval = 0
     private var startedAt = Date()
 
@@ -82,10 +103,15 @@ final class MeetingTranscriptionService: ObservableObject {
         }
         segments = []
         window16k = []
+        micWindow16k = []
+        micPending = []
+        systemActivity = SpeakerAttributor.TrackActivity()
+        micActivity = SpeakerAttributor.TrackActivity()
         windowStartOffset = 0
         gate = SilenceGateChunker()
         startedAt = Date()
         state = .listening(since: startedAt)
+        startMicTrack()
         startPump()
         NSLog("MeetingTranscription: started")
     }
@@ -97,14 +123,37 @@ final class MeetingTranscriptionService: ObservableObject {
         guard isListening else { return nil }
         pumpTask?.cancel()
         pumpTask = nil
-        // Drain whatever the tap still holds, then flush.
+        micTask?.cancel()
+        micTask = nil
+        // Drain whatever both tracks still hold, then flush.
         ingestDrainedAudio()
         tap.stop()
+        await mic.stop()
         await flushWindow()
         state = .idle
         audioLevel = 0
         NSLog("MeetingTranscription: stopped with \(segments.count) segments")
         return saveTranscript()
+    }
+
+    /// Reads the meeting mic stream ("You" track) into micPending.
+    private func startMicTrack() {
+        micTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let stream = try await self.mic.start()
+                for await chunk in stream {
+                    guard !Task.isCancelled else { return }
+                    if !self.micSuppressed {
+                        self.micPending.append(contentsOf: chunk)
+                    }
+                }
+            } catch {
+                // Mic track is best-effort: fall back to system-only
+                // transcription (segments become all-Them).
+                NSLog("MeetingTranscription: mic track failed — \(error)")
+            }
+        }
     }
 
     // MARK: - Pump
@@ -134,40 +183,78 @@ final class MeetingTranscriptionService: ObservableObject {
     }
 
     private func ingestDrainedAudio() {
+        // System track ("Them").
         let native = tap.drain()
-        guard !native.isEmpty else { return }
-        let chunk = SystemAudioTapService.resampleTo16k(native, fromRate: tap.sampleRate)
-        guard !chunk.isEmpty else { return }
+        let systemChunk = native.isEmpty
+            ? []
+            : SystemAudioTapService.resampleTo16k(native, fromRate: tap.sampleRate)
+        // Mic track ("You") — already 16kHz mono from AudioCaptureService.
+        let micChunk = micPending
+        micPending.removeAll(keepingCapacity: true)
 
-        if window16k.isEmpty {
+        guard !systemChunk.isEmpty || !micChunk.isEmpty else { return }
+
+        if window16k.isEmpty && micWindow16k.isEmpty {
+            let dominantCount = max(systemChunk.count, micChunk.count)
             windowStartOffset = Date().timeIntervalSince(startedAt)
-                - Double(chunk.count) / 16_000
+                - Double(dominantCount) / 16_000
         }
-        window16k.append(contentsOf: chunk)
+        window16k.append(contentsOf: systemChunk)
+        micWindow16k.append(contentsOf: micChunk)
 
-        let rms = Self.rms(chunk)
-        audioLevel = min(1, rms * 4)
-        gate.observe(rms: rms, duration: Double(chunk.count) / 16_000)
+        let systemRMS = Self.rms(systemChunk)
+        let micRMS = Self.rms(micChunk)
+        systemActivity.observe(rms: systemRMS, duration: Double(systemChunk.count) / 16_000, threshold: activityThreshold)
+        micActivity.observe(rms: micRMS, duration: Double(micChunk.count) / 16_000, threshold: activityThreshold)
+
+        // Indicator meter and the flush gate follow the louder track — the
+        // conversation pauses only when BOTH sides go quiet.
+        let combined = max(systemRMS, micRMS)
+        audioLevel = min(1, combined * 4)
+        let clockDuration = Double(max(systemChunk.count, micChunk.count)) / 16_000
+        gate.observe(rms: combined, duration: clockDuration)
     }
 
     private func flushWindow() async {
-        let window = window16k
+        let systemWindow = window16k
+        let micWindow = micWindow16k
+        let verdict = SpeakerAttributor.attribute(mic: micActivity, system: systemActivity)
         window16k = []
+        micWindow16k = []
+        systemActivity = SpeakerAttributor.TrackActivity()
+        micActivity = SpeakerAttributor.TrackActivity()
         gate.reset()
-        // The flushed audio becomes a permanent segment — reset the preview
+        // The flushed audio becomes permanent segments — reset the preview
         // so it starts fresh on the next window.
         livePartial = ""
         partialMerger = PartialTranscriptMerger()
-        // Sub-second windows are silence-gap artifacts, not speech.
-        guard window.count >= 16_000, let transcriber else { return }
+
+        guard let transcriber else { return }
         let offset = max(0, windowStartOffset)
+
+        // Them first (the call audio is usually the conversational anchor),
+        // then You. Sub-second windows are silence-gap artifacts — skip.
+        if verdict.them, systemWindow.count >= 16_000 {
+            await appendSegment(speaker: .them, samples: systemWindow, offset: offset, transcriber: transcriber)
+        }
+        if verdict.you, micWindow.count >= 16_000 {
+            await appendSegment(speaker: .you, samples: micWindow, offset: offset, transcriber: transcriber)
+        }
+    }
+
+    private func appendSegment(
+        speaker: Speaker,
+        samples: [Float],
+        offset: TimeInterval,
+        transcriber: any TranscriptionEngine
+    ) async {
         do {
-            let text = try await transcriber.transcribe(samples: window)
+            let text = try await transcriber.transcribe(samples: samples)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return }
-            segments.append(Segment(offset: offset, text: text))
+            segments.append(Segment(offset: offset, speaker: speaker, text: text))
         } catch {
-            NSLog("MeetingTranscription: chunk decode failed — \(error)")
+            NSLog("MeetingTranscription: \(speaker.rawValue) chunk decode failed — \(error)")
         }
     }
 
@@ -186,7 +273,7 @@ final class MeetingTranscriptionService: ObservableObject {
 
         var lines = ["# Meeting Transcript — \(startedAt.formatted(date: .abbreviated, time: .shortened))", ""]
         for segment in segments {
-            lines.append("**[\(Self.timestamp(segment.offset))]** \(segment.text)")
+            lines.append("**[\(Self.timestamp(segment.offset))] \(segment.speaker.rawValue):** \(segment.text)")
             lines.append("")
         }
         let body = lines.joined(separator: "\n")

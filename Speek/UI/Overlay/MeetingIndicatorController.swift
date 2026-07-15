@@ -214,9 +214,9 @@ struct MeetingIndicatorExpandedView: View {
     }
 
     private var recentTranscript: String {
-        var parts = service.segments.suffix(2).map(\.text)
+        var parts = service.segments.suffix(2).map { "\($0.speaker.rawValue): \($0.text)" }
         if !service.livePartial.isEmpty { parts.append(service.livePartial) }
-        return parts.joined(separator: " ")
+        return parts.joined(separator: "   ")
     }
 
     private var elapsedLabel: String {

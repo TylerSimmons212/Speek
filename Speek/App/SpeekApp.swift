@@ -116,7 +116,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = UpdaterService.shared
 
         // Pause music while recording; resume the moment recording ends
-        // (processing/inserting don't need silence).
+        // (processing/inserting don't need silence). Also pause the meeting
+        // "You" track — dictated speech belongs to the dictation pipeline,
+        // not the meeting transcript.
         session.$state
             .removeDuplicates()
             .sink { state in
@@ -125,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     MediaPauseService.shared.resumePausedApps()
                 }
+                MeetingTranscriptionService.shared.micSuppressed = (state == .recording)
             }
             .store(in: &cancellables)
 
