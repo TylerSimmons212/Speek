@@ -28,6 +28,8 @@ final class RecordingOverlayWindow {
         panel.hasShadow = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         panel.ignoresMouseEvents = true
+        // Live transcript is personal content — keep it out of screen shares.
+        panel.sharingType = .none
         self.panel = panel
         positionBottomCenter()
         panel.orderFront(nil)

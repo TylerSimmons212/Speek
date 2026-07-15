@@ -94,6 +94,14 @@ final class MeetingIndicatorController {
     private func expand() async {
         guard let screen = Self.targetScreen() else { return }
         await notch.expand(on: screen)
+        excludeFromScreenCapture()
+    }
+
+    /// The live transcript is personal content — keep it out of screen
+    /// shares and recordings. DynamicNotchKit recreates its window on each
+    /// show, so this is applied after every expand/compact.
+    private func excludeFromScreenCapture() {
+        notch.windowController?.window?.sharingType = .none
     }
 
     private func show() async {
@@ -102,6 +110,7 @@ final class MeetingIndicatorController {
         // one, DynamicNotchKit hides compact-only content — acceptable, the
         // menu bar item still shows the running state there.
         await notch.compact(on: screen)
+        excludeFromScreenCapture()
     }
 
     private static func targetScreen() -> NSScreen? {
@@ -175,6 +184,7 @@ struct MeetingIndicatorExpandedView: View {
                         .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
+                .pointerStyle(.link)
             }
 
             // Live transcript: recent finished segments + the in-flight

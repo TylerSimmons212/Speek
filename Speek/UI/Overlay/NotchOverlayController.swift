@@ -66,6 +66,9 @@ final class NotchOverlayController {
     private func show() async {
         guard let screen = Self.targetScreen() else { return }
         await notch.expand(on: screen)
+        // The dictation preview is personal content — exclude it from screen
+        // shares/recordings. Reapplied per show; the window is recreated.
+        notch.windowController?.window?.sharingType = .none
     }
 
     private func scheduleHide(afterMs ms: UInt64) {
