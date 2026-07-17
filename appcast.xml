@@ -3,6 +3,14 @@
     <channel>
         <title>Speek</title>
         <item>
+            <title>1.3.0</title>
+            <pubDate>Fri, 17 Jul 2026 01:14:59 -0700</pubDate>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.3.0/Speek.dmg" length="7229203" type="application/octet-stream" sparkle:edSignature="STyTgbzzXyt+PCtNpSd6U95VtHu1nj60Mk9ETKYbukfr9t+UMVF7xYj9rgXETYKLoy6HAd9ebiQq/PLHuKbWBQ=="/>
+        </item>
+        <item>
             <title>1.2.1</title>
             <pubDate>Wed, 15 Jul 2026 10:39:06 -0700</pubDate>
             <sparkle:version>5</sparkle:version>
@@ -17,14 +25,6 @@
             <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.2.0/Speek.dmg" length="6656995" type="application/octet-stream" sparkle:edSignature="ILSP52Gwk9w/x5MZrwnosojwrjSjT5+suIMKKoyiORs7isdUgfvpm65b5f+Owhz+efuD+wVi5ksIfEtFRhuvBA=="/>
-        </item>
-        <item>
-            <title>1.1.1</title>
-            <pubDate>Tue, 14 Jul 2026 13:12:33 -0700</pubDate>
-            <sparkle:version>3</sparkle:version>
-            <sparkle:shortVersionString>1.1.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.1.1/Speek.dmg" length="6567601" type="application/octet-stream" sparkle:edSignature="A9cGGtt5IwBay3L/ecpSLNeDFpguWRn2HnbDBosDxsWtEdLBn0v3pvHSRJzqHIqfoGDQOsX7sNz/IX8THFeVBw=="/>
         </item>
     </channel>
 </rss>
