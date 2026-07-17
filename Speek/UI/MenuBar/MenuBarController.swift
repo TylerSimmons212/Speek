@@ -8,6 +8,7 @@ final class MenuBarController {
     private let settingsWindow = SettingsWindowController()
     private var cancellables = Set<AnyCancellable>()
     private weak var meetingItem: NSMenuItem?
+    private weak var readAloudItem: NSMenuItem?
 
     init(session: DictationSession) {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -16,6 +17,10 @@ final class MenuBarController {
         }
 
         let menu = NSMenu()
+        let readAloudItem = NSMenuItem(title: "Read Selected Text Aloud", action: #selector(toggleReadAloud), keyEquivalent: "")
+        readAloudItem.target = self
+        menu.addItem(readAloudItem)
+        self.readAloudItem = readAloudItem
         let meetingItem = NSMenuItem(title: "Transcribe Meeting Audio", action: #selector(toggleMeetingTranscription), keyEquivalent: "")
         meetingItem.target = self
         menu.addItem(meetingItem)
@@ -39,6 +44,14 @@ final class MenuBarController {
             .sink { [weak self] state in self?.updateIcon(for: state) }
             .store(in: &cancellables)
 
+        SpeechService.shared.$state
+            .sink { [weak self] state in
+                self?.readAloudItem?.title = state == .idle
+                    ? "Read Selected Text Aloud"
+                    : "Stop Reading Aloud"
+            }
+            .store(in: &cancellables)
+
         MeetingTranscriptionService.shared.$state
             .sink { [weak self] state in
                 switch state {
@@ -52,6 +65,19 @@ final class MenuBarController {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    @objc private func toggleReadAloud() {
+        if SpeechService.shared.isSpeaking {
+            SpeechService.shared.stop()
+            return
+        }
+        // Let the menu fully dismiss and focus settle back on the user's app
+        // before reading its selection.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            ReadAloudController.shared.toggle()
+        }
     }
 
     @objc private func toggleMeetingTranscription() {

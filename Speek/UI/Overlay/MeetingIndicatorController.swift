@@ -63,9 +63,32 @@ final class MeetingIndicatorController {
                     if dictationIdle, service.isListening {
                         // Give the dictation overlay's collapse animation room.
                         try? await Task.sleep(nanoseconds: 500_000_000)
-                        guard service.isListening, session.state == .idle else { return }
+                        guard service.isListening, session.state == .idle,
+                              SpeechService.shared.state == .idle else { return }
                         await self.show()
                     } else if !dictationIdle {
+                        service.livePreviewActive = false
+                        await self.notch.hide()
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // …and to the read-aloud mini-player, which borrows the notch the
+        // same way dictation does.
+        SpeechService.shared.$state
+            .map { $0 == .idle }
+            .removeDuplicates()
+            .sink { [weak self] speechIdle in
+                guard let self else { return }
+                Task {
+                    if speechIdle, service.isListening, session.state == .idle {
+                        // Give the mini-player's collapse animation room.
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        guard service.isListening, session.state == .idle,
+                              SpeechService.shared.state == .idle else { return }
+                        await self.show()
+                    } else if !speechIdle, service.isListening {
                         service.livePreviewActive = false
                         await self.notch.hide()
                     }
@@ -116,6 +139,9 @@ final class MeetingIndicatorController {
     }
 
     private func show() async {
+        // The notch belongs to dictation or the read-aloud mini-player while
+        // either is active; their idle transitions re-show us.
+        guard SpeechService.shared.state == .idle else { return }
         guard let screen = Self.targetScreen() else { return }
         // Compact flanks the notch — physical or virtual — on every screen.
         let exclusion = Task { await excludeFromScreenCapture() }

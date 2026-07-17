@@ -34,8 +34,31 @@ final class HotkeyManager {
     /// function-key bindings (F13–F20) are matched on keyDown/keyUp.
     private(set) var binding: HotkeyBinding = .fn
 
+    // MARK: - Read-aloud trigger (optional second binding)
+
+    /// Fires once per clean tap of the read-aloud key. Unlike dictation's
+    /// press/release pair, read-aloud is a toggle — the consumer decides
+    /// whether a tap means "start reading" or "stop".
+    let readAloudEvents = PassthroughSubject<Void, Never>()
+    /// Nil = read-aloud hotkey off. Never equal to `binding` — dictation wins.
+    private(set) var readAloudBinding: HotkeyBinding?
+    private var raPressed = false
+    private var raDirty = false
+    private var raPressStart: Date?
+    /// A modifier held longer than this wasn't a tap — some other gesture.
+    private let raTapMaxDuration: TimeInterval = 0.6
+
     func configure(binding: HotkeyBinding) {
         self.binding = binding
+        // Re-evaluate the conflict guard against the new dictation key.
+        configureReadAloud(binding: readAloudBinding)
+    }
+
+    func configureReadAloud(binding: HotkeyBinding?) {
+        readAloudBinding = (binding == self.binding) ? nil : binding
+        raPressed = false
+        raDirty = false
+        raPressStart = nil
     }
 
     /// True while the event tap exists (started and not stopped).
@@ -74,14 +97,18 @@ final class HotkeyManager {
                 switch type {
                 case .flagsChanged:
                     manager.handle(event: event)
+                    manager.handleReadAloudFlags(event: event)
                 case .keyDown:
                     manager.handleKey(event: event, down: true)
+                    manager.handleReadAloudKey(event: event, down: true)
                 case .keyUp:
                     manager.handleKey(event: event, down: false)
+                    manager.handleReadAloudKey(event: event, down: false)
                 case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-                    // Any other input while the trigger is held marks the press
+                    // Any other input while a trigger is held marks the press
                     // as a chord — the release will be reported as not clean.
                     if manager.isPressed { manager.otherInputDuringPress = true }
+                    if manager.raPressed { manager.raDirty = true }
                 default:
                     break
                 }
@@ -122,6 +149,9 @@ final class HotkeyManager {
         runLoopSource = nil
         isPressed = false
         otherInputDuringPress = false
+        raPressed = false
+        raDirty = false
+        raPressStart = nil
     }
 
     /// The in-callback re-enable only runs if a `tapDisabledBy*` event is
@@ -166,6 +196,10 @@ final class HotkeyManager {
     /// bindings have no queryable "is held" state — a missed release there is
     /// recovered by the next keyDown edge resetting `isPressed`.)
     fileprivate func resyncStateAfterReenable() {
+        // A half-tracked read-aloud tap from before the outage is stale.
+        raPressed = false
+        raDirty = false
+        raPressStart = nil
         guard let flag = binding.flag else { return }
         let liveFlags = CGEventSource.flagsState(.combinedSessionState)
         if !liveFlags.contains(flag) && isPressed {
@@ -236,5 +270,55 @@ final class HotkeyManager {
         } else if down && isPressed {
             otherInputDuringPress = true
         }
+    }
+
+    // MARK: - Read-aloud handlers
+
+    /// flagsChanged — drives read-aloud MODIFIER bindings with tap semantics:
+    /// a clean press+release under `raTapMaxDuration` fires the trigger.
+    /// Anything else (chords, long holds) is the user doing something else.
+    fileprivate func handleReadAloudFlags(event: CGEvent) {
+        guard let ra = readAloudBinding else { return }
+        guard let flag = ra.flag else {
+            // Function-key read-aloud binding: modifier activity during the
+            // (instantaneous) keyDown trigger is irrelevant.
+            return
+        }
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let flagSet = event.flags.contains(flag)
+
+        if flagSet && keyCode == ra.keyCode && !raPressed {
+            raPressed = true
+            // Born dirty if any OTHER modifier family is already held — the
+            // user is mid-chord (⌘ + right-⌥ + …), not tapping our trigger.
+            let allModifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn]
+            raDirty = !event.flags.intersection(allModifiers.subtracting(flag)).isEmpty
+            raPressStart = Date()
+        } else if raPressed && (!flagSet || keyCode == ra.keyCode) {
+            raPressed = false
+            let duration = raPressStart.map { Date().timeIntervalSince($0) } ?? .infinity
+            raPressStart = nil
+            if !raDirty && duration < raTapMaxDuration {
+                readAloudEvents.send(())
+            }
+        } else if raPressed {
+            // Some OTHER modifier changed while ours is held — a chord.
+            raDirty = true
+        }
+    }
+
+    /// keyDown/keyUp — drives read-aloud FUNCTION-KEY bindings (fire on the
+    /// press edge), and chord detection for modifier bindings.
+    fileprivate func handleReadAloudKey(event: CGEvent, down: Bool) {
+        guard let ra = readAloudBinding else { return }
+        if case .functionKey(let triggerCode) = ra {
+            let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            guard keyCode == triggerCode, down else { return }
+            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            if !isRepeat { readAloudEvents.send(()) }
+            return
+        }
+        // Modifier binding: a character key during the hold makes it a chord.
+        if down && raPressed { raDirty = true }
     }
 }

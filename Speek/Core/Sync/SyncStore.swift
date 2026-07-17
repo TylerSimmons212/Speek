@@ -24,6 +24,10 @@ final class SyncStore {
     func setBool(_ value: Bool, forKey key: String) {
         backend.set(value, forKey: key); backend.synchronize()
     }
+    func double(forKey key: String) -> Double { (backend.object(forKey: key) as? Double) ?? 0 }
+    func setDouble(_ value: Double, forKey key: String) {
+        backend.set(value, forKey: key); backend.synchronize()
+    }
 
     /// Encodes/decodes a [String: String] dictionary as JSON. Stored as a String
     /// so it travels alongside the rest of the simple-typed settings.

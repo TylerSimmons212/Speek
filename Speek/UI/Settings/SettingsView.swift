@@ -2,12 +2,13 @@ import SwiftUI
 import AppKit
 
 enum SettingsCategory: String, Hashable, CaseIterable, Identifiable {
-    case general, permissions, audio, formatting, about
+    case general, readAloud, permissions, audio, formatting, about
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general: return "General"
+        case .readAloud: return "Read Aloud"
         case .permissions: return "Permissions"
         case .audio: return "Audio"
         case .formatting: return "Formatting"
@@ -18,6 +19,7 @@ enum SettingsCategory: String, Hashable, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .general: return "gearshape"
+        case .readAloud: return "speaker.wave.2"
         case .permissions: return "lock.shield"
         case .audio: return "mic"
         case .formatting: return "text.alignleft"
@@ -44,6 +46,7 @@ struct SettingsView: View {
             Group {
                 switch selection ?? .general {
                 case .general: GeneralPane()
+                case .readAloud: ReadAloudPane()
                 case .permissions: PermissionsPane()
                 case .audio: AudioPane()
                 case .formatting: FormattingPane()
@@ -104,6 +107,140 @@ private struct GeneralPane: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    }
+}
+
+// MARK: - Read Aloud
+
+private struct ReadAloudPane: View {
+    @ObservedObject var settings = SettingsStore.shared
+    @ObservedObject var speech = SpeechService.shared
+    @State private var neuralDownloading = false
+    @State private var neuralMessage: String?
+
+    private static let previewText = "Hi! This is how I'll sound when Speek reads to you."
+
+    var body: some View {
+        Form {
+            if !settings.kokoroVoiceDownloaded {
+                Section("Neural voice") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Speek reads with Kokoro, an open-source neural voice that runs entirely on this Mac's Neural Engine — dramatically more natural than the system voices. One-time download, then fully offline.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            Button(neuralDownloading ? "Downloading…" : "Download neural voice (~170 MB)") {
+                                downloadNeuralVoice()
+                            }
+                            .disabled(neuralDownloading)
+                            if neuralDownloading {
+                                ProgressView().controlSize(.small)
+                            }
+                            if let neuralMessage {
+                                Text(neuralMessage)
+                                    .font(.callout)
+                                    .foregroundStyle(.orange)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        Text("Until it's downloaded, reading uses a basic system voice.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            Section("Voice") {
+                Picker("Voice", selection: voiceSelection) {
+                    ForEach(KokoroVoiceCatalog.voices) { voice in
+                        Text("\(voice.name)  —  \(voice.flavor)").tag(voice.id)
+                    }
+                }
+                .disabled(!settings.kokoroVoiceDownloaded)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Text("Speed")
+                        Text("Slower").font(.caption).foregroundStyle(.secondary)
+                        Slider(value: $settings.ttsRate, in: 0.35...0.65)
+                        Text("Faster").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button(speech.isSpeaking ? "Stop preview" : "Preview voice") {
+                        if speech.isSpeaking {
+                            speech.stop()
+                        } else {
+                            speech.speak(Self.previewText)
+                        }
+                    }
+                    Text("New voices download automatically the first time you use them (about half a megabyte each). Everything runs on-device.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 4)
+            }
+            Section("Trigger") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Select text anywhere, then use the menu bar item (Read Selected Text Aloud) or the keyboard shortcut below. Tap the shortcut to read the selection; tap again to stop.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if settings.readAloudBinding != nil {
+                        HotkeyRecorderView(binding: Binding(
+                            get: { settings.readAloudBinding ?? .rightOption },
+                            set: { settings.readAloudBinding = $0 }
+                        ))
+                        if settings.readAloudBinding == settings.hotkeyBinding {
+                            Text("That's your dictation key — read aloud won't trigger until you pick a different one.")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Button("Remove shortcut") { settings.readAloudBinding = nil }
+                            .controlSize(.small)
+                    } else {
+                        Button("Add keyboard shortcut…") {
+                            settings.readAloudBinding = Self.defaultBinding(avoiding: settings.hotkeyBinding)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
+
+    /// The picker always shows a valid neural voice: legacy Apple ids (or
+    /// empty "automatic") display as the default voice, and selecting any
+    /// entry writes a neural id back.
+    private var voiceSelection: Binding<String> {
+        Binding(
+            get: {
+                KokoroVoiceCatalog.voice(forIdentifier: settings.ttsVoiceIdentifier)?.id
+                    ?? NeuralSpeechEngine.defaultVoiceIdentifier
+            },
+            set: { settings.ttsVoiceIdentifier = $0 }
+        )
+    }
+
+    private func downloadNeuralVoice() {
+        neuralDownloading = true
+        neuralMessage = nil
+        Task { @MainActor in
+            do {
+                try await NeuralSpeechEngine.shared.prepare()
+                settings.kokoroVoiceDownloaded = true
+                settings.ttsVoiceIdentifier = NeuralSpeechEngine.defaultVoiceIdentifier
+            } catch {
+                neuralMessage = "Download failed — check your connection and try again. (\(error.localizedDescription))"
+            }
+            neuralDownloading = false
+        }
+    }
+
+    private static func defaultBinding(avoiding dictation: HotkeyBinding) -> HotkeyBinding {
+        [.rightOption, .rightCommand, .fn].first { $0 != dictation } ?? .rightOption
     }
 }
 

@@ -85,6 +85,25 @@ final class SettingsStore: ObservableObject {
     @Published var meetingConsentAcknowledged: Bool {
         didSet { sync.setBool(meetingConsentAcknowledged, forKey: "meetingConsent") }
     }
+    /// Optional read-aloud trigger key (tap to read the selection, tap again
+    /// to stop). Nil = no hotkey; the Service and menu bar still work.
+    @Published var readAloudBinding: HotkeyBinding? {
+        didSet { sync.setString(readAloudBinding?.jsonString ?? "", forKey: "readAloudBinding") }
+    }
+    /// Text-to-speech voice identifier. Empty = automatic (best installed
+    /// Premium/Enhanced voice for the user's language).
+    @Published var ttsVoiceIdentifier: String {
+        didSet { sync.setString(ttsVoiceIdentifier, forKey: "ttsVoice") }
+    }
+    /// AVSpeechUtterance rate, 0–1 (0.5 = the system's natural pace).
+    @Published var ttsRate: Double {
+        didSet { sync.setDouble(ttsRate, forKey: "ttsRate") }
+    }
+    /// The Kokoro neural voice has been downloaded (shows in the picker).
+    /// If the cache is ever wiped, first playback transparently re-downloads.
+    @Published var kokoroVoiceDownloaded: Bool {
+        didSet { sync.setBool(kokoroVoiceDownloaded, forKey: "kokoroDownloaded") }
+    }
 
     private let sync: SyncStore
     init(sync: SyncStore = SyncStore()) {
@@ -128,6 +147,15 @@ final class SettingsStore: ObservableObject {
             : true
         self.onboardingCompleted = sync.bool(forKey: "onboardingCompleted")
         self.meetingConsentAcknowledged = sync.bool(forKey: "meetingConsent")
+        if let json = sync.string(forKey: "readAloudBinding"), !json.isEmpty,
+           let binding = HotkeyBinding.from(jsonString: json) {
+            self.readAloudBinding = binding
+        } else {
+            self.readAloudBinding = nil
+        }
+        self.ttsVoiceIdentifier = sync.string(forKey: "ttsVoice") ?? ""
+        self.ttsRate = sync.hasValue(forKey: "ttsRate") ? sync.double(forKey: "ttsRate") : 0.5
+        self.kokoroVoiceDownloaded = sync.bool(forKey: "kokoroDownloaded")
     }
 }
 

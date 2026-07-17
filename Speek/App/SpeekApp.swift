@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notchOverlay: NotchOverlayController?
     private var onboarding: OnboardingWindowController?
     private var meetingIndicator: MeetingIndicatorController?
+    private var speechOverlay: SpeechOverlayController?
     private var cancellables = Set<AnyCancellable>()
     /// Press timestamp for the current key press, used to classify hold vs tap.
     private var pressStartTime: Date?
@@ -112,6 +113,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             session: session
         )
 
+        // Read Aloud: the notch mini-player (triggers: menu bar + hotkey).
+        speechOverlay = SpeechOverlayController()
+        // Warm the neural voice at launch when it's the chosen voice — the
+        // first CoreML load compiles for the ANE and takes seconds; doing it
+        // now means the first read starts instantly.
+        if SettingsStore.shared.ttsVoiceIdentifier.hasPrefix(NeuralSpeechEngine.voiceIdentifierPrefix) {
+            Task { try? await NeuralSpeechEngine.shared.prepare() }
+        }
+
         // Start Sparkle's background update-check cycle.
         _ = UpdaterService.shared
 
@@ -123,11 +133,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .removeDuplicates()
             .sink { state in
                 if state == .recording {
+                    // Dictation always wins the speakers and the mic:
+                    // otherwise the mic transcribes the Mac talking to itself.
+                    SpeechService.shared.stop()
                     MediaPauseService.shared.pausePlayingApps()
-                } else {
+                } else if SpeechService.shared.state == .idle {
                     MediaPauseService.shared.resumePausedApps()
                 }
                 MeetingTranscriptionService.shared.micSuppressed = (state == .recording)
+            }
+            .store(in: &cancellables)
+
+        // Reading aloud over Spotify is as bad as dictating over it — same
+        // pause/resume dance (MediaPauseService honors the settings toggle).
+        // Collapse to a speaking bool first: pause/resume WITHIN one read
+        // must not re-fire pausePlayingApps(), which would wipe its memory
+        // of what it paused.
+        SpeechService.shared.$state
+            .map { $0 != .idle }
+            .removeDuplicates()
+            .sink { [weak self] speaking in
+                if speaking {
+                    MediaPauseService.shared.pausePlayingApps()
+                } else if self?.session?.state == .idle {
+                    MediaPauseService.shared.resumePausedApps()
+                }
             }
             .store(in: &cancellables)
 
@@ -152,8 +182,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
 
         hotkey.configure(binding: SettingsStore.shared.hotkeyBinding)
+        hotkey.configureReadAloud(binding: SettingsStore.shared.readAloudBinding)
         hotkey.events
             .sink { [weak self] event in self?.handle(event: event, session: session) }
+            .store(in: &cancellables)
+        hotkey.readAloudEvents
+            .sink { [weak self] in
+                // Only when dictation is quiet — mid-recording the same
+                // physical gesture is a chord, not a read-aloud request.
+                guard self?.session?.state == .idle else { return }
+                ReadAloudController.shared.toggle()
+            }
+            .store(in: &cancellables)
+        SettingsStore.shared.$readAloudBinding
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] binding in
+                self?.hotkey.configureReadAloud(binding: binding)
+            }
             .store(in: &cancellables)
         // Creating the CGEventTap is itself what triggers the Input Monitoring
         // permission prompt — so during first-run onboarding, defer it until
@@ -175,6 +221,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let wasRunning = self.hotkey.isRunning
                 self.hotkey.stop()
                 self.hotkey.configure(binding: binding)
+                // Re-push the read-aloud key from settings: a conflict with
+                // the OLD dictation key may have suppressed it, and the new
+                // dictation key may free it up (or newly collide).
+                self.hotkey.configureReadAloud(binding: SettingsStore.shared.readAloudBinding)
                 if wasRunning { self.hotkey.start() }
             }
             .store(in: &cancellables)
