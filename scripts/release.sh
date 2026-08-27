@@ -121,6 +121,26 @@ if [ -x "$SPARKLE_BIN/generate_appcast" ]; then
     -o "$ROOT_DIR/appcast.xml" \
     "$BUILD_DIR"
   echo "   appcast.xml updated (remember to commit + push it)"
+  # Give every item a release-notes link (the GitHub release page) — without
+  # one, Sparkle's update dialog shows an empty notes pane.
+  python3 - "$ROOT_DIR/appcast.xml" <<'NOTESEOF'
+import re, sys
+path = sys.argv[1]
+xml = open(path).read()
+def add_link(match):
+    item = match.group(0)
+    if "releaseNotesLink" in item:
+        return item
+    vm = re.search(r"<sparkle:shortVersionString>([^<]+)</sparkle:shortVersionString>", item)
+    if not vm or "<enclosure" not in item:
+        return item
+    link = ("<sparkle:releaseNotesLink>https://github.com/TylerSimmons212/Speek/"
+            f"releases/tag/v{vm.group(1)}</sparkle:releaseNotesLink>\n            ")
+    return item.replace("<enclosure", link + "<enclosure", 1)
+xml = re.sub(r"<item>.*?</item>", add_link, xml, flags=re.S)
+open(path, "w").write(xml)
+print("   release-notes links injected")
+NOTESEOF
 else
   echo "   ⚠️  generate_appcast not found at $SPARKLE_BIN — skipping appcast."
   echo "      Download from https://github.com/sparkle-project/Sparkle/releases"
@@ -132,6 +152,7 @@ echo "🎉 Done!"
 echo "   Distributable: $DMG_PATH"
 ls -lh "$DMG_PATH"
 echo ""
-echo "To publish v$VERSION:"
-echo "  gh release create v$VERSION $DMG_PATH --title \"Speek $VERSION\" --generate-notes"
-echo "  git add appcast.xml && git commit -m \"release: v$VERSION appcast\" && git push"
+echo "To publish v$VERSION — IN THIS ORDER (the appcast must go live AFTER"
+echo "the release asset exists, or updaters that poll in between hit a 404):"
+echo "  1. gh release create v$VERSION $DMG_PATH --title \"Speek $VERSION\" --generate-notes"
+echo "  2. git add appcast.xml && git commit -m \"release: v$VERSION appcast\" && git push"

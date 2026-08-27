@@ -17,6 +17,11 @@ final class HotkeyManager {
         case released(clean: Bool)
     }
     let events = PassthroughSubject<Event, Never>()
+    /// False when the CGEventTap could not be created (Input Monitoring
+    /// revoked) or a dead tap could not be recreated — i.e. the hotkey is
+    /// silently broken. The menu bar surfaces this instead of leaving the
+    /// user with a dead key and an NSLog nobody reads.
+    let tapHealthy = CurrentValueSubject<Bool, Never>(true)
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -130,11 +135,13 @@ final class HotkeyManager {
         )
         guard let eventTap else {
             NSLog("HotkeyManager: CGEvent.tapCreate returned nil — grant Input Monitoring to Speek in System Settings → Privacy & Security → Input Monitoring, then relaunch.")
+            tapHealthy.send(false)
             return
         }
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: eventTap, enable: true)
+        tapHealthy.send(true)
         startHealthCheck()
     }
 

@@ -20,6 +20,12 @@ actor S1PolishStage: PolishStage {
     private var context: OpaquePointer?        // llama_context *
     private var sampler: UnsafeMutablePointer<llama_sampler>?
     private var loadFailed = false
+    private var idleMonitor: Task<Void, Never>?
+    private var lastUsed = ContinuousClock.now
+    /// Idle window before the resident weights (~500 MB) are freed. Warm
+    /// reloads are a few seconds; the reload never blocks a dictation (see
+    /// run()), so the only cost is one rule-only dictation after a long gap.
+    private let idleUnloadAfter: Duration = .seconds(30 * 60)
 
     /// s1-mini is trained for ~1k-token passes; 2048 fits system prompt +
     /// a chunked input + the 1.3× output budget with headroom, and keeps the
@@ -60,13 +66,34 @@ actor S1PolishStage: PolishStage {
         self.model = model
         self.context = context
         self.sampler = sampler
+        lastUsed = ContinuousClock.now
+        startIdleMonitor()
         NSLog("S1PolishStage: s1-mini loaded")
+    }
+
+    private func startIdleMonitor() {
+        idleMonitor?.cancel()
+        idleMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5 * 60))
+                guard let self, !Task.isCancelled else { return }
+                await self.unloadIfIdle()
+            }
+        }
+    }
+
+    private func unloadIfIdle() {
+        guard context != nil, ContinuousClock.now - lastUsed > idleUnloadAfter else { return }
+        NSLog("S1PolishStage: freeing idle model — reloads on next dictation")
+        unload()
     }
 
     /// Frees the model (used when the polish engine is switched off in
     /// Settings — no reason to keep half a gigabyte resident). Also clears a
     /// previous load failure so a re-enable retries.
     func unload() {
+        idleMonitor?.cancel()
+        idleMonitor = nil
         if let sampler { llama_sampler_free(sampler) }
         if let context { llama_free(context) }
         if let model { llama_model_free(model) }
@@ -78,8 +105,15 @@ actor S1PolishStage: PolishStage {
 
     func run(_ input: String) async -> String {
         guard !input.isEmpty else { return input }
-        prepare()
-        guard context != nil else { return input }
+        lastUsed = ContinuousClock.now
+        if context == nil {
+            // Cold model (launch race or idle-unloaded): never stall a
+            // dictation on a multi-second load — ship the rule-cleaned text
+            // now and warm the model for the next one.
+            guard !loadFailed, S1ModelStore.isModelPresent else { return input }
+            Task { self.prepare() }
+            return input
+        }
         var pieces: [String] = []
         for chunk in S1Prompt.chunk(input) {
             guard let cleaned = normalize(chunk) else { return input } // fail open

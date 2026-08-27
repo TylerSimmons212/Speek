@@ -63,6 +63,16 @@ final class NeuralSpeechEngine {
         prepared = true
     }
 
+    /// Frees the CoreML model chain (hundreds of MB resident). No-op while
+    /// synthesis is running. The next prepare() reloads — warm loads are
+    /// sub-second, so an idle unload is nearly free.
+    func unload() {
+        guard synthesisTask == nil else { return }
+        manager = nil
+        prepared = false
+        NSLog("NeuralSpeechEngine: freed idle Kokoro model")
+    }
+
     // MARK: - Voice packs
 
     /// Additional voice packs come from the standard Kokoro export (verified

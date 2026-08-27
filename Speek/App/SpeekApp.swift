@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var meetingIndicator: MeetingIndicatorController?
     private var speechOverlay: SpeechOverlayController?
     private var cancellables = Set<AnyCancellable>()
+    private var kokoroIdleTask: Task<Void, Never>?
     /// Press timestamp for the current key press, used to classify hold vs tap.
     private var pressStartTime: Date?
     /// Release timestamp of the last short tap; used for double-tap detection.
@@ -119,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Task { await S1PolishStage.shared.prepare() }
             }
             .store(in: &cancellables)
-        self.menuBar = MenuBarController(session: session)
+        self.menuBar = MenuBarController(session: session, hotkey: hotkey)
         buildOverlay(style: SettingsStore.shared.overlayStyle, session: session)
 
         // Meeting transcription shares the Parakeet engine (the actor
@@ -161,6 +162,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     MediaPauseService.shared.resumePausedApps()
                 }
                 MeetingTranscriptionService.shared.micSuppressed = (state == .recording)
+            }
+            .store(in: &cancellables)
+
+        // Free Kokoro (hundreds of MB resident) after 10 idle minutes; warm
+        // reloads are sub-second, so the next read barely notices.
+        SpeechService.shared.$state
+            .removeDuplicates()
+            .sink { [weak self] state in
+                guard let self else { return }
+                self.kokoroIdleTask?.cancel()
+                self.kokoroIdleTask = nil
+                guard state == .idle else { return }
+                self.kokoroIdleTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 10 * 60 * 1_000_000_000)
+                    guard !Task.isCancelled, SpeechService.shared.state == .idle else { return }
+                    NeuralSpeechEngine.shared.unload()
+                }
             }
             .store(in: &cancellables)
 

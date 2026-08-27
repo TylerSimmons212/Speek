@@ -9,14 +9,30 @@ final class MenuBarController {
     private var cancellables = Set<AnyCancellable>()
     private weak var meetingItem: NSMenuItem?
     private weak var readAloudItem: NSMenuItem?
+    private weak var hotkeyWarningItem: NSMenuItem?
+    private weak var updatesItem: NSMenuItem?
+    private let hotkey: HotkeyManager?
+    private var hotkeyHealthy = true
 
-    init(session: DictationSession) {
+    init(session: DictationSession, hotkey: HotkeyManager? = nil) {
+        self.hotkey = hotkey
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "mic", accessibilityDescription: "Speek")
         }
 
         let menu = NSMenu()
+        // Hidden unless the CGEventTap is dead (Input Monitoring revoked) —
+        // without this the app runs with a silently dead hotkey.
+        let hotkeyWarningItem = NSMenuItem(
+            title: "⚠️ Hotkey Inactive — Grant Input Monitoring…",
+            action: #selector(fixHotkeyPermission),
+            keyEquivalent: ""
+        )
+        hotkeyWarningItem.target = self
+        hotkeyWarningItem.isHidden = true
+        menu.addItem(hotkeyWarningItem)
+        self.hotkeyWarningItem = hotkeyWarningItem
         let readAloudItem = NSMenuItem(title: "Read Selected Text Aloud", action: #selector(toggleReadAloud), keyEquivalent: "")
         readAloudItem.target = self
         menu.addItem(readAloudItem)
@@ -32,6 +48,7 @@ final class MenuBarController {
         let updatesItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         updatesItem.target = self
         menu.addItem(updatesItem)
+        self.updatesItem = updatesItem
         menu.addItem(NSMenuItem.separator())
         // Leave Quit's target = nil so the action routes up the responder
         // chain to NSApplication (which implements terminate:). Setting
@@ -49,6 +66,26 @@ final class MenuBarController {
                 self?.readAloudItem?.title = state == .idle
                     ? "Read Selected Text Aloud"
                     : "Stop Reading Aloud"
+            }
+            .store(in: &cancellables)
+
+        hotkey?.tapHealthy
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] healthy in
+                guard let self else { return }
+                self.hotkeyHealthy = healthy
+                self.hotkeyWarningItem?.isHidden = healthy
+                self.updateIcon(for: session.state)
+            }
+            .store(in: &cancellables)
+
+        UpdaterService.shared.updateAvailable
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] version in
+                self?.updatesItem?.title = version.map { "Update Available (\($0))…" }
+                    ?? "Check for Updates…"
             }
             .store(in: &cancellables)
 
@@ -106,6 +143,16 @@ final class MenuBarController {
         service.start()
     }
 
+    @objc private func fixHotkeyPermission() {
+        PermissionsCoordinator.shared.openSystemSettings(.inputMonitoring)
+        // Retry once the user returns — start() is idempotent and re-publishes
+        // health either way.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            self?.hotkey?.start()
+        }
+    }
+
     private func updateIcon(for state: DictationSession.State) {
         guard let button = statusItem.button else { return }
         switch state {
@@ -114,7 +161,9 @@ final class MenuBarController {
         case .processing:
             button.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Processing")
         default:
-            button.image = NSImage(systemSymbolName: "mic", accessibilityDescription: "Speek")
+            button.image = hotkeyHealthy
+                ? NSImage(systemSymbolName: "mic", accessibilityDescription: "Speek")
+                : NSImage(systemSymbolName: "mic.slash", accessibilityDescription: "Hotkey inactive")
         }
     }
 
