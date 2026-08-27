@@ -1,7 +1,9 @@
 # Speek — Project Context
 
 Native **macOS dictation** app. Push-to-talk, fully **on-device**: transcription
-via FluidAudio (Parakeet TDT v2), transcript cleanup via `S1PolishStage` —
+via FluidAudio (Parakeet TDT v2; live preview streams from Apple's
+SpeechAnalyzer via `SpeechPreviewEngine`, Parakeet loop as fallback),
+transcript cleanup via `S1PolishStage` —
 s1-mini ("S1-mini" by Superwhisper, a 0.6B Qwen3 fine-tune, official Q4_K_M
 GGUF run through llama.cpp/Metal) — preceded by a slim `RuleStage` (custom
 vocabulary + dictated punctuation commands only). Also ships meeting
