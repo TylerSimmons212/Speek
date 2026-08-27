@@ -7,44 +7,59 @@ actor AudioCaptureService {
 
     private let engine = AVAudioEngine()
     private var continuation: AsyncStream<[Float]>.Continuation?
+    private var configChangeTask: Task<Void, Never>?
 
     /// Starts capture and returns an AsyncStream of Float32 PCM buffers.
-    /// Each yielded chunk is ~100ms of audio at 16kHz (1600 samples).
+    /// Each yielded chunk is one converted tap buffer (~21ms at a 48kHz
+    /// native rate). Chunks are yielded directly from the tap callback, so
+    /// ordering is FIFO and stop() leaves no chunks in flight.
     func start() throws -> AsyncStream<[Float]> {
-        let stream = AsyncStream<[Float]> { continuation in
-            self.continuation = continuation
-        }
+        let (stream, continuation) = AsyncStream<[Float]>.makeStream()
+        self.continuation = continuation
+        try beginCapture(into: continuation)
 
+        // Mic route changes mid-recording (AirPods connecting, a USB mic
+        // unplugged) stop the engine and change the input format. Reinstall
+        // the tap with a fresh converter so an in-flight dictation survives
+        // the switch instead of going silently deaf. (The notification isn't
+        // filtered by engine — Read Aloud owns another AVAudioEngine — but
+        // reinstalling our tap is harmless when it fires for that one.)
+        configChangeTask = Task { [weak self] in
+            let changes = NotificationCenter.default
+                .notifications(named: .AVAudioEngineConfigurationChange)
+                .map { _ in () } // Notification itself isn't Sendable
+            for await _ in changes {
+                guard let self, !Task.isCancelled else { return }
+                await self.restartAfterConfigChange()
+            }
+        }
+        return stream
+    }
+
+    private func beginCapture(into continuation: AsyncStream<[Float]>.Continuation) throws {
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
-        guard let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16_000,
-            channels: 1,
-            interleaved: false
-        ) else { throw CaptureError.engineFailed(NSError(domain: "speek", code: -1)) }
+        guard inputFormat.sampleRate > 0,
+              let targetFormat = AVAudioFormat(
+                  commonFormat: .pcmFormatFloat32,
+                  sampleRate: 16_000,
+                  channels: 1,
+                  interleaved: false
+              ),
+              let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            throw CaptureError.engineFailed(NSError(domain: "speek", code: -1))
+        }
 
-        let converter = AVAudioConverter(from: inputFormat, to: targetFormat)
-
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            guard let converter else { return }
-            let frameCapacity = AVAudioFrameCount(targetFormat.sampleRate / 10) // ~100ms
-            guard let outBuffer = AVAudioPCMBuffer(
-                pcmFormat: targetFormat,
-                frameCapacity: frameCapacity
-            ) else { return }
-
-            var error: NSError?
-            converter.convert(to: outBuffer, error: &error) { _, status in
-                status.pointee = .haveData
-                return buffer
-            }
-            guard error == nil,
-                  let floats = outBuffer.floatChannelData?[0] else { return }
-            let count = Int(outBuffer.frameLength)
-            let samples = Array(UnsafeBufferPointer(start: floats, count: count))
-            Task { await self.yield(samples) }
+        input.removeTap(onBus: 0)
+        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { buffer, _ in
+            guard let samples = Self.convertedChunk(
+                from: buffer,
+                converter: converter,
+                targetFormat: targetFormat
+            ), !samples.isEmpty else { return }
+            // AsyncStream continuations are thread-safe, and tap callbacks
+            // for one node are serial — yielding here keeps chunks in order.
+            continuation.yield(samples)
         }
 
         do {
@@ -53,17 +68,57 @@ actor AudioCaptureService {
         } catch {
             throw CaptureError.engineFailed(error)
         }
-        return stream
+    }
+
+    private func restartAfterConfigChange() {
+        guard let continuation else { return } // not capturing
+        engine.inputNode.removeTap(onBus: 0)
+        try? beginCapture(into: continuation)
+    }
+
+    /// Converts one tap buffer to the target format.
+    ///
+    /// The input block hands the converter this buffer EXACTLY ONCE and
+    /// reports .noDataNow afterwards. Returning .haveData with the same
+    /// buffer on every invocation — the obvious-looking implementation — is
+    /// the classic AVAudioConverter bug: the converter keeps pulling until
+    /// the output buffer is full and re-consumes the same input ~5x,
+    /// feeding duplicated, stuttered audio downstream. The output buffer is
+    /// sized for a single input buffer so nothing tempts the converter to
+    /// ask for more.
+    nonisolated static func convertedChunk(
+        from buffer: AVAudioPCMBuffer,
+        converter: AVAudioConverter,
+        targetFormat: AVAudioFormat
+    ) -> [Float]? {
+        let ratio = targetFormat.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 8
+        guard capacity > 0,
+              let outBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else {
+            return nil
+        }
+
+        var consumed = false
+        var error: NSError?
+        converter.convert(to: outBuffer, error: &error) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        guard error == nil, let floats = outBuffer.floatChannelData?[0] else { return nil }
+        return Array(UnsafeBufferPointer(start: floats, count: Int(outBuffer.frameLength)))
     }
 
     func stop() {
+        configChangeTask?.cancel()
+        configChangeTask = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         continuation?.finish()
         continuation = nil
-    }
-
-    private func yield(_ samples: [Float]) {
-        continuation?.yield(samples)
     }
 }

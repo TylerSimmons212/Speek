@@ -122,9 +122,14 @@ final class DictationSession: ObservableObject {
     func stopRecording() async {
         guard state == .recording else { return }
         await audio.stop()
-        captureTask?.cancel()
         previewTask?.cancel()
         previewTask = nil
+        // Drain the capture loop instead of cancelling it: audio.stop()
+        // finished the stream, but the last chunks may still be between the
+        // tap and `samples` — cancelling here could drop the tail of the
+        // utterance (the classic "last word cut off").
+        await captureTask?.value
+        captureTask = nil
         state = .processing
 
         do {

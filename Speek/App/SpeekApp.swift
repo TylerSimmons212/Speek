@@ -70,13 +70,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             self.transcriber = try await ParakeetEngine()
         } catch {
-            print("Parakeet load failed: \(error)")
+            NSLog("Parakeet load failed: \(error)")
         }
 
-        // Build the session with whatever transcriber loaded — if Parakeet failed,
-        // session remains nil and hotkey events are ignored. Future task can
-        // surface the load failure in the UI.
-        guard let transcriber = self.transcriber else { return }
+        // Build the full UI even when the model failed to load (first launch
+        // offline hits this deterministically): with no menu bar item an
+        // LSUIElement app is invisible and unquittable. The stub engine
+        // surfaces the failure via the session's error path on each attempt.
+        let transcriber: any TranscriptionEngine =
+            self.transcriber ?? UnavailableTranscriptionEngine()
 
         let session = DictationSession(
             audio: audio,
@@ -117,8 +119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildOverlay(style: SettingsStore.shared.overlayStyle, session: session)
 
         // Meeting transcription shares the Parakeet engine (the actor
-        // serializes decodes with dictation safely).
-        MeetingTranscriptionService.shared.transcriber = transcriber
+        // serializes decodes with dictation safely). Only wired when the real
+        // engine loaded.
+        if let parakeet = self.transcriber {
+            MeetingTranscriptionService.shared.transcriber = parakeet
+        }
         self.meetingIndicator = MeetingIndicatorController(
             service: MeetingTranscriptionService.shared,
             session: session

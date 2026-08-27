@@ -41,7 +41,7 @@ final class AXInjector: TextInjector {
         }
 
         if let beforeCount {
-            try Self.verifyByCount(
+            try await Self.verifyByCount(
                 axElement,
                 beforeCount: beforeCount,
                 insertedUTF16: text.utf16.count,
@@ -69,6 +69,13 @@ final class AXInjector: TextInjector {
     /// tolerance for app-side transforms like smart quotes or autocorrect).
     /// When the count can't prove anything (same-length replacement), fall
     /// back to reading just the inserted span — O(text), never O(document).
+    ///
+    /// Bias: a false "failed" verdict is WORSE than a false "landed" one —
+    /// failure sends CompositeInjector to the typing fallback, and if the AX
+    /// write actually landed, the user gets the text TWICE. So: apps that
+    /// apply AX writes asynchronously (Electron/web views) get a few beats
+    /// for the count to move, and a write whose result we cannot read at all
+    /// is trusted on its .success return.
     private static func verifyByCount(
         _ element: AXUIElement,
         beforeCount: Int,
@@ -76,16 +83,21 @@ final class AXInjector: TextInjector {
         replacedUTF16: Int,
         insertionLocation: Int?,
         insertedText: String
-    ) throws {
-        guard let afterCount = characterCount(element) else {
-            throw InjectionError.unsupportedTarget
-        }
+    ) async throws {
         let expectedGrowth = insertedUTF16 - replacedUTF16
         if expectedGrowth != 0 {
-            guard afterCount != beforeCount, afterCount >= beforeCount + expectedGrowth - 2 else {
-                throw InjectionError.unsupportedTarget
+            for attempt in 0..<4 {
+                guard let afterCount = characterCount(element) else {
+                    return // write succeeded but result unreadable — trust it
+                }
+                if afterCount != beforeCount, afterCount >= beforeCount + expectedGrowth - 2 {
+                    return
+                }
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
             }
-            return
+            throw InjectionError.unsupportedTarget
         }
         // Same-length replacement — counts can't detect a silent no-op.
         // Read back only the span we wrote; if the app can't do that either,
