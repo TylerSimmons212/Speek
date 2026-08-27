@@ -3,11 +3,22 @@
     <channel>
         <title>Speek</title>
         <item>
+            <title>1.4.0</title>
+            <pubDate>Thu, 27 Aug 2026 10:53:01 -0700</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://github.com/TylerSimmons212/Speek/releases/tag/v1.4.0</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.4.0/Speek.dmg" length="18835786" type="application/octet-stream" sparkle:edSignature="Y/qiHm+DFHo4M1mEjUQMcrfSmN641QbAAINjtMPjcM4dKgb/eN9ZkZtuJ93bgfAITJwl/BbWzWenapqIU2MCAA=="/>
+        </item>
+        <item>
             <title>1.3.0</title>
             <pubDate>Fri, 17 Jul 2026 01:14:59 -0700</pubDate>
             <sparkle:version>6</sparkle:version>
             <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://github.com/TylerSimmons212/Speek/releases/tag/v1.3.0</sparkle:releaseNotesLink>
             <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.3.0/Speek.dmg" length="7229203" type="application/octet-stream" sparkle:edSignature="STyTgbzzXyt+PCtNpSd6U95VtHu1nj60Mk9ETKYbukfr9t+UMVF7xYj9rgXETYKLoy6HAd9ebiQq/PLHuKbWBQ=="/>
         </item>
         <item>
@@ -16,6 +27,7 @@
             <sparkle:version>5</sparkle:version>
             <sparkle:shortVersionString>1.2.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://github.com/TylerSimmons212/Speek/releases/tag/v1.2.1</sparkle:releaseNotesLink>
             <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.2.1/Speek.dmg" length="6656971" type="application/octet-stream" sparkle:edSignature="tpY+ehteKP1EqA/pRGJqMqCkW+Rm70fLBr5CSRFFyTakKN8g1JefZeZifcs/7Bmrn8GLsosJ+vnqqvWoRNthBg=="/>
         </item>
         <item>
@@ -24,6 +36,7 @@
             <sparkle:version>4</sparkle:version>
             <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://github.com/TylerSimmons212/Speek/releases/tag/v1.2.0</sparkle:releaseNotesLink>
             <enclosure url="https://github.com/TylerSimmons212/Speek/releases/download/v1.2.0/Speek.dmg" length="6656995" type="application/octet-stream" sparkle:edSignature="ILSP52Gwk9w/x5MZrwnosojwrjSjT5+suIMKKoyiORs7isdUgfvpm65b5f+Owhz+efuD+wVi5ksIfEtFRhuvBA=="/>
         </item>
     </channel>
