@@ -8,6 +8,9 @@ final class SettingsStore: ObservableObject {
     enum HotkeyMode: String { case pushToTalk, toggle }
     enum OverlayStyle: String { case notch, bottomPill }
     enum PolishEngine: String { case off, s1Mini }
+    /// Per-app insertion override values (absence of an override = the
+    /// default AX-first ladder).
+    enum InsertionMethod: String { case paste, type }
 
     /// The dictation trigger key. Persisted as JSON; the legacy three-option
     /// string ("hotkey" key) migrates on first read.
@@ -51,6 +54,16 @@ final class SettingsStore: ObservableObject {
     }
     @Published var learnFromCorrections: Bool {
         didSet { sync.setBool(learnFromCorrections, forKey: "learnFromCorrections") }
+    }
+    /// Hands-free: a latched (double-tap) recording ends automatically after
+    /// a trailing pause. Never applies to held push-to-talk.
+    @Published var handsFreeAutoStop: Bool {
+        didSet { sync.setBool(handsFreeAutoStop, forKey: "handsFreeAutoStop") }
+    }
+    /// bundle identifier → InsertionMethod rawValue. Apps whose AX writes
+    /// misbehave (Electron) can be pinned to paste or keystrokes.
+    @Published var insertionOverrides: [String: String] {
+        didSet { sync.setStringDictionary(insertionOverrides, forKey: "insertionOverrides") }
     }
     /// Pause Music/Spotify while recording; resume after. On by default.
     @Published var pauseMediaWhileDictating: Bool {
@@ -114,6 +127,8 @@ final class SettingsStore: ObservableObject {
         self.learnFromCorrections = sync.hasValue(forKey: "learnFromCorrections")
             ? sync.bool(forKey: "learnFromCorrections")
             : true
+        self.handsFreeAutoStop = sync.bool(forKey: "handsFreeAutoStop")
+        self.insertionOverrides = sync.stringDictionary(forKey: "insertionOverrides")
         self.pauseMediaWhileDictating = sync.hasValue(forKey: "pauseMedia")
             ? sync.bool(forKey: "pauseMedia")
             : true

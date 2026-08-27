@@ -1,11 +1,13 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import Foundation
 import os
 
 final class CompositeInjector: TextInjector {
     private let primary: TextInjector
     private let fallback: TextInjector
+    private let paste: TextInjector = PasteInjector()
     private let log = Logger(subsystem: "com.tylersimmons.speek", category: "injection")
 
     init(primary: TextInjector = AXInjector(), fallback: TextInjector = TypingInjector()) {
@@ -36,6 +38,19 @@ final class CompositeInjector: TextInjector {
         // tree — on content-heavy documents that costs whole seconds, and we
         // used to pay it on EVERY insertion. Native apps answer without it;
         // dormant Electron trees get coaxed exactly once per process.
+        // Per-app override for the frontmost app, if the user configured one.
+        let override = await MainActor.run { () -> SettingsStore.InsertionMethod? in
+            guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                  let raw = SettingsStore.shared.insertionOverrides[bundleID] else { return nil }
+            return SettingsStore.InsertionMethod(rawValue: raw)
+        }
+        // Secure Keyboard Entry (terminals, password prompts) silently drops
+        // synthesized keystrokes and ⌘V. AX writes still land, so the ladder
+        // proceeds — but any path that would END at synthetic input ends at
+        // the clipboard instead, and the "Copied" hint tells the user to
+        // paste manually.
+        let secureInput = IsSecureEventInputEnabled()
+
         var verdict = Self.focusedElementVerdict()
         if verdict != .editable, Self.coaxFrontmostAppAXIfNeeded() {
             verdict = Self.focusedElementVerdict()
@@ -49,8 +64,16 @@ final class CompositeInjector: TextInjector {
             // The focused app refuses to answer accessibility queries at all
             // (dormant/none Electron tree, some cross-platform toolkits). We
             // can't know what's focused — but the user pressed the hotkey
-            // with a caret somewhere, and synthesized keystrokes don't need
-            // the AX tree. Type directly rather than punting to the clipboard.
+            // with a caret somewhere, and synthetic input doesn't need the
+            // AX tree.
+            if secureInput {
+                log.info("AX-opaque app under secure input — copying only")
+                return try Self.copyToClipboard(text)
+            }
+            if override == .paste {
+                log.info("AX-opaque app, per-app override — pasting")
+                return try await paste.insert(text)
+            }
             log.debug("focused app is AX-opaque — typing keystrokes directly")
             return try await fallback.insert(text)
 
@@ -59,12 +82,7 @@ final class CompositeInjector: TextInjector {
             // button, a Finder window, a read-only view. Typing here would
             // spray keystrokes into shortcut handlers; copy instead.
             log.debug("no text-editable focused; copying to clipboard only")
-            let pb = NSPasteboard.general
-            pb.clearContents()
-            guard pb.setString(text, forType: .string) else {
-                throw InjectionError.clipboardFailed
-            }
-            return .copied
+            return try Self.copyToClipboard(text)
         }
 
         var adjusted = text
@@ -73,6 +91,19 @@ final class CompositeInjector: TextInjector {
             // Case first (needs the text's first letter), then space.
             adjusted = Self.smartCased(text, afterMeaningful: context.lastMeaningful)
             adjusted = Self.smartSpaced(adjusted, afterPrevious: context.immediate)
+        }
+
+        // User pinned this app to a specific method — honor it (secure input
+        // permitting; under secure input the ladder below ends in a copy).
+        if !secureInput, let override {
+            switch override {
+            case .paste:
+                log.info("per-app override — pasting")
+                return try await paste.insert(adjusted)
+            case .type:
+                log.info("per-app override — typing keystrokes")
+                return try await fallback.insert(adjusted)
+            }
         }
 
         let useAX = await MainActor.run { SettingsStore.shared.axInsertionEnabled }
@@ -88,6 +119,10 @@ final class CompositeInjector: TextInjector {
             }
         } else if axBlocked {
             log.debug("AX skipped for known-bad bundle \(frontmostBundleID ?? "?") — using synthesized keystrokes")
+        }
+        if secureInput {
+            log.info("secure input active — synthetic keystrokes would be dropped; copying only")
+            return try Self.copyToClipboard(adjusted)
         }
         let result = try await fallback.insert(adjusted)
         log.info("keystroke injection finished at \(Self.elapsedMs(since: insertStart))ms total")
@@ -201,6 +236,15 @@ final class CompositeInjector: TextInjector {
     /// element wakes the tree so subsequent focused-element queries actually
     /// see the text input. Cheap to call every time; native Cocoa apps just
     /// ignore the unknown attribute write.
+    private static func copyToClipboard(_ text: String) throws -> InjectionResult {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+            throw InjectionError.clipboardFailed
+        }
+        return .copied
+    }
+
     /// PIDs already coaxed this session. Re-setting the attributes is wasted
     /// IPC, and AXEnhancedUserInterface in particular can retrigger expensive
     /// accessibility-tree work in web views. Both attributes stick for the

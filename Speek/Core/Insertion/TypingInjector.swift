@@ -106,7 +106,7 @@ final class TypingInjector: TextInjector {
     /// Polls until no modifier flags are held, or the timeout elapses. The
     /// timeout path proceeds anyway — typing with a stuck modifier is still
     /// better than silently dropping the user's dictation.
-    private static func waitForModifierRelease() async {
+    static func waitForModifierRelease() async {
         let interesting: CGEventFlags = [
             .maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn
         ]

@@ -31,6 +31,11 @@ final class DictationSession: ObservableObject {
     private var samples: [Float] = []
     private var captureTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
+    /// True while a latched (toggle) recording should end itself after a
+    /// trailing pause. Armed by the app layer on double-tap latch; held
+    /// push-to-talk never auto-stops.
+    private var autoStopArmed = false
+    private var autoStopGate = AutoStopGate()
     /// Seconds between live-preview decodes. Each tick re-transcribes the
     /// whole buffer; on the ANE this is fast enough that a fixed cadence
     /// works, and because the decode happens inline in the loop, a slow
@@ -61,6 +66,8 @@ final class DictationSession: ObservableObject {
         samples = []
         audioLevel = 0
         partialText = ""
+        autoStopArmed = false
+        autoStopGate.reset()
         if SettingsStore.shared.livePreviewEnabled {
             startPreview()
         }
@@ -76,6 +83,11 @@ final class DictationSession: ObservableObject {
                     }
                     // No-op unless an Apple preview session is active.
                     await self.livePreview.feed(chunk)
+                    if self.autoStopArmed,
+                       self.autoStopGate.observe(rms: level, duration: Double(chunk.count) / 16_000) {
+                        self.autoStopArmed = false
+                        Task { await self.stopRecording() }
+                    }
                 }
             } catch {
                 await MainActor.run { self.state = .error(error.localizedDescription) }
@@ -181,6 +193,15 @@ final class DictationSession: ObservableObject {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             if case .error = state { state = .idle }
         }
+    }
+
+    /// Arms hands-free auto-stop for the current latched recording: after
+    /// speech followed by a trailing pause, the session stops itself. The
+    /// app layer calls this on double-tap latch when the setting is on.
+    func armAutoStop() {
+        guard state == .recording else { return }
+        autoStopGate.reset()
+        autoStopArmed = true
     }
 
     /// Aborts an in-flight recording without transcribing. Used for sub-threshold

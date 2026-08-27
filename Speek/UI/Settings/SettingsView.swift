@@ -1,5 +1,6 @@
-import SwiftUI
 import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
 
 enum SettingsCategory: String, Hashable, CaseIterable, Identifiable {
     case general, readAloud, permissions, audio, formatting, about
@@ -87,6 +88,15 @@ private struct GeneralPane: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.vertical, 4)
+                Toggle(isOn: $settings.handsFreeAutoStop) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Hands-free stop").font(.body.weight(.medium))
+                        Text("A latched (double-tap) session ends on its own after you stop talking for a moment. Held push-to-talk is never auto-stopped.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             Section("Overlay") {
                 Picker("Style", selection: $settings.overlayStyle) {
@@ -415,6 +425,7 @@ private struct FormattingPane: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                InsertionOverridesView()
             }
             Section("Learning") {
                 Toggle(isOn: $settings.learnFromCorrections) {
@@ -558,5 +569,66 @@ private struct S1ModelRow: View {
                 Button("Retry") { store.retry() }
             }
         }
+    }
+}
+
+/// Per-app insertion overrides: apps whose text fields misbehave with AX
+/// writes (many Electron apps) can be pinned to paste (⌘V with clipboard
+/// restore) or raw keystrokes.
+private struct InsertionOverridesView: View {
+    @ObservedObject var settings = SettingsStore.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Per-app method").font(.body.weight(.medium))
+            Text("Most apps work best with the default. If text lands garbled or not at all in a specific app, pin it to Paste.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(settings.insertionOverrides.keys.sorted(), id: \.self) { bundleID in
+                HStack(spacing: 8) {
+                    Text(Self.displayName(for: bundleID))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Picker("", selection: Binding(
+                        get: { settings.insertionOverrides[bundleID] ?? SettingsStore.InsertionMethod.paste.rawValue },
+                        set: { settings.insertionOverrides[bundleID] = $0 }
+                    )) {
+                        Text("Paste (⌘V)").tag(SettingsStore.InsertionMethod.paste.rawValue)
+                        Text("Type keystrokes").tag(SettingsStore.InsertionMethod.type.rawValue)
+                    }
+                    .labelsHidden()
+                    .frame(width: 150)
+                    Button {
+                        settings.insertionOverrides.removeValue(forKey: bundleID)
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove override")
+                }
+            }
+            Button("Add App…") { addApp() }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func addApp() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the app whose insertion method to override"
+        guard panel.runModal() == .OK, let url = panel.url,
+              let bundleID = Bundle(url: url)?.bundleIdentifier else { return }
+        settings.insertionOverrides[bundleID] = SettingsStore.InsertionMethod.paste.rawValue
+    }
+
+    private static func displayName(for bundleID: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return bundleID
+        }
+        return FileManager.default.displayName(atPath: url.path)
     }
 }

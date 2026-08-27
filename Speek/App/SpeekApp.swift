@@ -152,7 +152,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // not the meeting transcript.
         session.$state
             .removeDuplicates()
-            .sink { state in
+            .sink { [weak self] state in
+                // A latched recording that ended without the un-latch tap
+                // (hands-free auto-stop, or an error) must release the latch,
+                // or the next press gets swallowed as an "end" tap.
+                if state != .recording, self?.toggleLocked == true {
+                    self?.toggleLocked = false
+                    self?.pressStartTime = nil
+                    self?.lastShortReleaseTime = nil
+                }
                 if state == .recording {
                     // Dictation always wins the speakers and the mic:
                     // otherwise the mic transcribes the Mac talking to itself.
@@ -369,6 +377,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 toggleLocked = true
                 lastShortReleaseTime = nil
                 // Recording is already running from the second press; let it continue.
+                if SettingsStore.shared.handsFreeAutoStop {
+                    session.armAutoStop()
+                }
                 return
             }
             // Single short tap — discard the negligible audio so Parakeet
