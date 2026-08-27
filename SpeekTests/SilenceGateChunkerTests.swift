@@ -38,21 +38,15 @@ final class SilenceGateChunkerTests: XCTestCase {
         XCTAssertFalse(gate.shouldFlush(windowDuration: 3.0))
     }
 
-    func test_resample_48k_to_16k_averages_triples() {
-        let samples: [Float] = [3, 3, 3, 6, 6, 6, 9, 9, 9]
-        let out = SystemAudioTapService.resampleTo16k(samples, fromRate: 48_000)
-        XCTAssertEqual(out, [3, 6, 9])
-    }
-
     func test_resample_16k_passthrough() {
         let samples: [Float] = [1, 2, 3]
-        XCTAssertEqual(SystemAudioTapService.resampleTo16k(samples, fromRate: 16_000), samples)
+        XCTAssertEqual(StreamResampler(fromRate: 16_000).resample(samples), samples)
     }
 
     func test_resample_44100_produces_expected_count() {
         let samples = [Float](repeating: 0.5, count: 44_100) // 1 second
-        let out = SystemAudioTapService.resampleTo16k(samples, fromRate: 44_100)
-        // ~16000 samples, allow converter edge slack.
+        let out = StreamResampler(fromRate: 44_100).resample(samples)
+        // ~16000 samples, allow converter edge slack (filter priming).
         XCTAssertGreaterThan(out.count, 15_800)
         XCTAssertLessThanOrEqual(out.count, 16_100)
     }

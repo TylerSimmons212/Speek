@@ -102,6 +102,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         .store(in: &cancellables)
 
+        // Apple speech assets for the live preview tier (system-managed
+        // download; no-op once installed).
+        Task { await SpeechPreviewEngine.shared.prepare() }
+
         // s1-mini: fetch weights if needed and pre-load so the first
         // dictation doesn't pay the model-load cost. When the download
         // finishes (first launch), load then too.

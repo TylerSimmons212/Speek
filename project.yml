@@ -8,9 +8,13 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "26.0"
-    DEVELOPMENT_TEAM: ""
+    # Real team + Apple Development signing keeps the cdhash-derived TCC
+    # identity stable across Debug builds — ad-hoc ("-") churned it every
+    # build, forcing re-grants of Input Monitoring/Accessibility. CLI test
+    # builds still override to ad-hoc; release.sh signs with Developer ID.
+    DEVELOPMENT_TEAM: "7MGPA96634"
     CODE_SIGN_STYLE: Automatic
-    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_IDENTITY: "Apple Development"
 packages:
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio

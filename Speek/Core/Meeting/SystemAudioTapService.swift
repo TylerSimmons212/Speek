@@ -77,6 +77,10 @@ final class SystemAudioTapService: @unchecked Sendable {
         }
         sampleRate = asbd.mSampleRate
         let channelCount = max(1, Int(asbd.mChannelsPerFrame))
+        // Non-interleaved streams deliver one AudioBuffer per channel;
+        // treating them as interleaved would drop every channel but the
+        // first and garble the mono downmix.
+        let interleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
 
         // 3. A private aggregate device wrapping the tap — the only way to
         //    run an IO proc against tap audio.
@@ -104,7 +108,7 @@ final class SystemAudioTapService: @unchecked Sendable {
         //    (downmix to mono, append under lock).
         var newProcID: AudioDeviceIOProcID?
         let procStatus = AudioDeviceCreateIOProcIDWithBlock(&newProcID, aggregateID, nil) { [weak self] _, inInputData, _, _, _ in
-            self?.ingest(bufferList: inInputData, channels: channelCount)
+            self?.ingest(bufferList: inInputData, channels: channelCount, interleaved: interleaved)
         }
         guard procStatus == noErr, let procID = newProcID else {
             cleanupAggregate()
@@ -151,27 +155,46 @@ final class SystemAudioTapService: @unchecked Sendable {
 
     // MARK: - Internals
 
-    private func ingest(bufferList: UnsafePointer<AudioBufferList>, channels: Int) {
+    private func ingest(bufferList: UnsafePointer<AudioBufferList>, channels: Int, interleaved: Bool) {
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
-        guard let buffer = buffers.first,
-              let data = buffer.mData else { return }
-        let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-        guard sampleCount > 0 else { return }
-        let floats = data.bindMemory(to: Float.self, capacity: sampleCount)
+        let mono: [Float]
+        if interleaved || buffers.count <= 1 {
+            guard let buffer = buffers.first, let data = buffer.mData else { return }
+            let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+            guard sampleCount > 0 else { return }
+            let floats = data.bindMemory(to: Float.self, capacity: sampleCount)
 
-        // Downmix interleaved channels to mono.
-        let frames = sampleCount / max(1, channels)
-        var mono = [Float](repeating: 0, count: frames)
-        if channels == 1 {
-            mono.withUnsafeMutableBufferPointer { dst in
-                dst.baseAddress?.update(from: floats, count: frames)
+            // Downmix interleaved channels to mono.
+            let frames = sampleCount / max(1, channels)
+            var mixed = [Float](repeating: 0, count: frames)
+            if channels == 1 {
+                mixed.withUnsafeMutableBufferPointer { dst in
+                    dst.baseAddress?.update(from: floats, count: frames)
+                }
+            } else {
+                for frame in 0..<frames {
+                    var sum: Float = 0
+                    for ch in 0..<channels { sum += floats[frame * channels + ch] }
+                    mixed[frame] = sum / Float(channels)
+                }
             }
+            mono = mixed
         } else {
-            for frame in 0..<frames {
-                var sum: Float = 0
-                for ch in 0..<channels { sum += floats[frame * channels + ch] }
-                mono[frame] = sum / Float(channels)
+            // Non-interleaved: one AudioBuffer per channel — average them.
+            let channelData: [(UnsafePointer<Float>, Int)] = buffers.compactMap { buffer in
+                guard let data = buffer.mData else { return nil }
+                let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+                guard count > 0 else { return nil }
+                return (UnsafePointer(data.bindMemory(to: Float.self, capacity: count)), count)
             }
+            guard let frames = channelData.map(\.1).min(), frames > 0 else { return }
+            var mixed = [Float](repeating: 0, count: frames)
+            for (floats, _) in channelData {
+                for frame in 0..<frames { mixed[frame] += floats[frame] }
+            }
+            let scale = 1 / Float(channelData.count)
+            for frame in 0..<frames { mixed[frame] *= scale }
+            mono = mixed
         }
 
         bufferLock.lock()
@@ -193,55 +216,56 @@ final class SystemAudioTapService: @unchecked Sendable {
         }
     }
 
-    // MARK: - Resampling helper (consumer-side)
+}
 
-    /// Downsamples mono samples from `fromRate` to 16kHz for Parakeet.
-    /// Uses simple averaging when the ratio is integral (48k → 16k is 3:1),
-    /// AVAudioConverter otherwise (44.1k etc.).
-    static func resampleTo16k(_ samples: [Float], fromRate: Double) -> [Float] {
+/// Streaming 16kHz mono resampler for the system-audio track. One instance
+/// per meeting session: the converter KEEPS its filter state across chunks.
+/// The old per-drain approach built a fresh AVAudioConverter (and flushed it
+/// with .endOfStream) every 500ms, which reset the resampling filter at
+/// every chunk boundary (audible artifacts at 44.1kHz) and truncated
+/// fractional samples per call (cumulative drift).
+final class StreamResampler {
+    let fromRate: Double
+    private let converter: AVAudioConverter?
+    private let inFormat: AVAudioFormat?
+    private let outFormat: AVAudioFormat?
+
+    init(fromRate: Double) {
+        self.fromRate = fromRate
+        if fromRate == 16_000 {
+            converter = nil
+            inFormat = nil
+            outFormat = nil
+            return
+        }
+        inFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: fromRate, channels: 1, interleaved: false
+        )
+        outFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false
+        )
+        if let inFormat, let outFormat {
+            converter = AVAudioConverter(from: inFormat, to: outFormat)
+        } else {
+            converter = nil
+        }
+    }
+
+    func resample(_ samples: [Float]) -> [Float] {
         guard !samples.isEmpty else { return [] }
-        if fromRate == 16_000 { return samples }
-
-        let ratio = fromRate / 16_000
-        if ratio == ratio.rounded(), ratio >= 1 {
-            let step = Int(ratio)
-            var out = [Float]()
-            out.reserveCapacity(samples.count / step + 1)
-            var i = 0
-            while i + step <= samples.count {
-                var sum: Float = 0
-                for j in 0..<step { sum += samples[i + j] }
-                out.append(sum / Float(step))
-                i += step
-            }
-            return out
+        guard let converter, let inFormat, let outFormat else { return samples } // already 16k
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: inFormat, frameCapacity: AVAudioFrameCount(samples.count)
+        ) else { return [] }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { source in
+            buffer.floatChannelData?[0].update(from: source.baseAddress!, count: samples.count)
         }
-
-        // Non-integral ratio: proper conversion.
-        guard let inFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: fromRate, channels: 1, interleaved: false),
-              let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false),
-              let converter = AVAudioConverter(from: inFormat, to: outFormat),
-              let inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: AVAudioFrameCount(samples.count)) else {
-            return samples
-        }
-        inBuffer.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { src in
-            inBuffer.floatChannelData?[0].update(from: src.baseAddress!, count: samples.count)
-        }
-        let outCapacity = AVAudioFrameCount(Double(samples.count) / ratio + 1)
-        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outCapacity) else { return samples }
-        var fed = false
-        converter.convert(to: outBuffer, error: nil) { _, status in
-            if fed {
-                status.pointee = .endOfStream
-                return nil
-            }
-            fed = true
-            status.pointee = .haveData
-            return inBuffer
-        }
-        let frames = Int(outBuffer.frameLength)
-        guard frames > 0, let channel = outBuffer.floatChannelData?[0] else { return [] }
-        return Array(UnsafeBufferPointer(start: channel, count: frames))
+        // One-shot input block (see AudioCaptureService.convertedChunk):
+        // .noDataNow, not .endOfStream, so the converter retains state for
+        // the next chunk instead of flushing.
+        return AudioCaptureService.convertedChunk(
+            from: buffer, converter: converter, targetFormat: outFormat
+        ) ?? []
     }
 }

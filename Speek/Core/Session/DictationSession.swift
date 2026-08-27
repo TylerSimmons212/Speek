@@ -21,6 +21,7 @@ final class DictationSession: ObservableObject {
     @Published private(set) var partialText: String = ""
 
     private let audio: AudioCaptureService
+    private let livePreview = SpeechPreviewEngine.shared
     private let transcriber: any TranscriptionEngine
     /// Settable so the app can rebuild it (e.g. when the user edits their
     /// custom vocabulary in Settings) without recreating the session.
@@ -61,7 +62,7 @@ final class DictationSession: ObservableObject {
         audioLevel = 0
         partialText = ""
         if SettingsStore.shared.livePreviewEnabled {
-            startPreviewLoop()
+            startPreview()
         }
         captureTask = Task { [weak self] in
             guard let self else { return }
@@ -73,6 +74,8 @@ final class DictationSession: ObservableObject {
                         self.samples.append(contentsOf: chunk)
                         self.audioLevel = level
                     }
+                    // No-op unless an Apple preview session is active.
+                    await self.livePreview.feed(chunk)
                 }
             } catch {
                 await MainActor.run { self.state = .error(error.localizedDescription) }
@@ -92,30 +95,45 @@ final class DictationSession: ObservableObject {
         return min(1, raw * 4)
     }
 
-    /// Re-transcribes the accumulated buffer on a fixed cadence and publishes
-    /// a flicker-stable rolling transcript. Runs only while recording; the
-    /// final transcript still comes from the full pipeline in stopRecording()
-    /// — this loop is purely cosmetic feedback.
-    private func startPreviewLoop() {
+    /// Two-tier live preview. Primary: Apple's SpeechAnalyzer streams
+    /// volatile hypotheses within a few hundred ms of speech (fed chunk by
+    /// chunk from the capture loop). Fallback (assets missing, locale
+    /// unsupported): the Parakeet re-decode loop. Either way the preview is
+    /// purely cosmetic — the final transcript always comes from the full
+    /// pipeline in stopRecording().
+    private func startPreview() {
         previewTask?.cancel()
-        let intervalNs = UInt64(previewInterval * 1_000_000_000)
-        let minSamples = previewMinSamples
         previewTask = Task { [weak self] in
-            var merger = PartialTranscriptMerger()
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: intervalNs)
-                guard let self, !Task.isCancelled else { return }
-                guard self.state == .recording else { return }
-                let snapshot = self.samples
-                guard snapshot.count >= minSamples else { continue }
-                // Preview failures are non-events — skip the tick and let the
-                // next one try again. AsrManager is an actor, so this decode
-                // and the final decode in stopRecording() serialize safely.
-                guard let text = try? await self.transcriber.transcribe(samples: snapshot) else { continue }
-                guard !Task.isCancelled, self.state == .recording else { return }
-                let display = merger.merge(text)
-                if !display.isEmpty { self.partialText = display }
+            guard let self else { return }
+            if let updates = await self.livePreview.start() {
+                for await text in updates {
+                    guard !Task.isCancelled, self.state == .recording else { break }
+                    if !text.isEmpty { self.partialText = text }
+                }
+            } else {
+                await self.runParakeetPreviewLoop()
             }
+        }
+    }
+
+    /// Fallback preview: re-transcribes the accumulated buffer on a fixed
+    /// cadence and publishes a flicker-stable rolling transcript. AsrManager
+    /// is an actor, so these decodes and the final decode in stopRecording()
+    /// serialize safely; a slow decode naturally stretches the cadence.
+    private func runParakeetPreviewLoop() async {
+        let intervalNs = UInt64(previewInterval * 1_000_000_000)
+        var merger = PartialTranscriptMerger()
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: intervalNs)
+            guard !Task.isCancelled, state == .recording else { return }
+            let snapshot = samples
+            guard snapshot.count >= previewMinSamples else { continue }
+            // Preview failures are non-events — skip the tick and let the
+            // next one try again.
+            guard let text = try? await transcriber.transcribe(samples: snapshot) else { continue }
+            guard !Task.isCancelled, state == .recording else { return }
+            let display = merger.merge(text)
+            if !display.isEmpty { partialText = display }
         }
     }
 
@@ -124,6 +142,7 @@ final class DictationSession: ObservableObject {
         await audio.stop()
         previewTask?.cancel()
         previewTask = nil
+        await livePreview.finish()
         // Drain the capture loop instead of cancelling it: audio.stop()
         // finished the stream, but the last chunks may still be between the
         // tap and `samples` — cancelling here could drop the tail of the
@@ -173,6 +192,7 @@ final class DictationSession: ObservableObject {
         captureTask?.cancel()
         previewTask?.cancel()
         previewTask = nil
+        await livePreview.finish()
         samples = []
         partialText = ""
         state = .idle

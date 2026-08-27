@@ -71,6 +71,7 @@ final class MeetingTranscriptionService: ObservableObject {
     private var micTask: Task<Void, Never>?
     /// Mic chunks pushed by the stream reader, drained by the pump.
     private var micPending: [Float] = []
+    private var systemResampler: StreamResampler?
     /// True while the user is dictating — their speech is going to the
     /// dictation pipeline, not the meeting, so the You-track pauses.
     var micSuppressed = false
@@ -202,9 +203,15 @@ final class MeetingTranscriptionService: ObservableObject {
     private func ingestDrainedAudio() {
         // System track ("Them").
         let native = tap.drain()
+        // Session-persistent resampler: keeps converter state across drains
+        // (a fresh converter per 500ms chunk resets the filter at every
+        // boundary and drifts by the truncated fractional samples).
+        if systemResampler?.fromRate != tap.sampleRate {
+            systemResampler = StreamResampler(fromRate: tap.sampleRate)
+        }
         let systemChunk = native.isEmpty
             ? []
-            : SystemAudioTapService.resampleTo16k(native, fromRate: tap.sampleRate)
+            : (systemResampler?.resample(native) ?? [])
         // Mic track ("You") — already 16kHz mono from AudioCaptureService.
         let micChunk = micPending
         micPending.removeAll(keepingCapacity: true)
