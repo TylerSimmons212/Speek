@@ -12,18 +12,24 @@ final class AXInjector: TextInjector {
         // swiftlint:disable:next force_cast
         let axElement = element as! AXUIElement
 
-        // Many apps (Messages, Electron-based apps, some Cocoa text views)
-        // accept the kAXSelectedText write and return .success but don't
-        // actually insert anything. Read the value before and after and only
-        // claim success if the field actually changed.
-        let beforeValue = readValue(axElement)
-        let beforeLength = beforeValue?.count
-
         var rangeRef: CFTypeRef?
         let rangeErr = AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef)
-        guard rangeErr == .success, rangeRef != nil else {
+        guard rangeErr == .success, let rangeRef else {
             throw InjectionError.unsupportedTarget
         }
+        var selection = CFRange(location: 0, length: 0)
+        let haveSelection = AXValueGetValue(rangeRef as! AXValue, .cfRange, &selection)
+
+        // Many apps (Messages, Electron-based apps, some Cocoa text views)
+        // accept the kAXSelectedText write and return .success but don't
+        // actually insert anything — so every write is verified. Verification
+        // used to read the ENTIRE field value twice (before + after); on
+        // large documents those two O(document) IPC serializations made every
+        // insertion visibly slow. Where the element reports a character count
+        // we verify by counts instead — two O(1) reads. The full-value
+        // comparison remains as the fallback for elements without counts.
+        let beforeCount = Self.characterCount(axElement)
+        let beforeValue = beforeCount == nil ? readValue(axElement) : nil
 
         let setErr = AXUIElementSetAttributeValue(
             axElement,
@@ -34,22 +40,79 @@ final class AXInjector: TextInjector {
             throw InjectionError.unsupportedTarget
         }
 
-        // Verify the write actually landed. Apps like Messages accept the
-        // kAXSelectedText write and return .success, but the visible composer
-        // is drawn from a separate text store — the value we read back may
-        // either not change OR change without reflecting our text. Demand
-        // both: the value must have changed AND the new value must contain
-        // exactly what we wrote.
-        if let beforeValue {
+        if let beforeCount {
+            try Self.verifyByCount(
+                axElement,
+                beforeCount: beforeCount,
+                insertedUTF16: text.utf16.count,
+                replacedUTF16: haveSelection ? selection.length : 0,
+                insertionLocation: haveSelection ? selection.location : nil,
+                insertedText: text
+            )
+        } else if let beforeValue {
+            // Demand both: the value must have changed AND the new value must
+            // contain what we wrote (or have grown by roughly its length —
+            // apps that autocorrect on insert transform the text slightly).
             let afterValue = readValue(axElement) ?? beforeValue
             let didChange = afterValue != beforeValue
             let containsInserted = afterValue.contains(text)
-            let grew = beforeLength.map { afterValue.count >= $0 + text.count - 1 } ?? false
+            let grew = afterValue.count >= beforeValue.count + text.count - 1
             guard didChange && (containsInserted || grew) else {
                 throw InjectionError.unsupportedTarget
             }
         }
         return .inserted
+    }
+
+    /// Count-based write verification: the field must have grown by the
+    /// inserted length minus whatever selection it replaced (with a small
+    /// tolerance for app-side transforms like smart quotes or autocorrect).
+    /// When the count can't prove anything (same-length replacement), fall
+    /// back to reading just the inserted span — O(text), never O(document).
+    private static func verifyByCount(
+        _ element: AXUIElement,
+        beforeCount: Int,
+        insertedUTF16: Int,
+        replacedUTF16: Int,
+        insertionLocation: Int?,
+        insertedText: String
+    ) throws {
+        guard let afterCount = characterCount(element) else {
+            throw InjectionError.unsupportedTarget
+        }
+        let expectedGrowth = insertedUTF16 - replacedUTF16
+        if expectedGrowth != 0 {
+            guard afterCount != beforeCount, afterCount >= beforeCount + expectedGrowth - 2 else {
+                throw InjectionError.unsupportedTarget
+            }
+            return
+        }
+        // Same-length replacement — counts can't detect a silent no-op.
+        // Read back only the span we wrote; if the app can't do that either,
+        // accept the .success return (the pre-existing blacklist covers known
+        // liars).
+        guard let location = insertionLocation,
+              let span = stringForRange(element, location: location, length: insertedUTF16) else { return }
+        guard span == insertedText else {
+            throw InjectionError.unsupportedTarget
+        }
+    }
+
+    private static func characterCount(_ element: AXUIElement) -> Int? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &ref) == .success,
+              let count = ref as? Int else { return nil }
+        return count
+    }
+
+    private static func stringForRange(_ element: AXUIElement, location: Int, length: Int) -> String? {
+        var range = CFRange(location: location, length: length)
+        guard let axRange = AXValueCreate(.cfRange, &range) else { return nil }
+        var ref: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element, kAXStringForRangeParameterizedAttribute as CFString, axRange, &ref
+        ) == .success else { return nil }
+        return ref as? String
     }
 
     private func readValue(_ element: AXUIElement) -> String? {

@@ -13,6 +13,7 @@ final class SpeechOverlayController {
     private var cancellables = Set<AnyCancellable>()
     private let speech: SpeechService
     private var settleTask: Task<Void, Never>?
+    private var strayGuard: NotchStrayWindowGuard?
 
     init(speech: SpeechService = .shared) {
         self.speech = speech
@@ -48,6 +49,10 @@ final class SpeechOverlayController {
                 }
             }
             .store(in: &cancellables)
+
+        strayGuard = NotchStrayWindowGuard(notch: notch) { [weak speech] in
+            (speech?.state ?? .idle) == .idle
+        }
 
         notch.$isHovering
             .removeDuplicates()

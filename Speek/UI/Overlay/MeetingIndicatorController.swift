@@ -16,6 +16,7 @@ final class MeetingIndicatorController {
     private var cancellables = Set<AnyCancellable>()
     private let service: MeetingTranscriptionService
     private let session: DictationSession
+    private var strayGuard: NotchStrayWindowGuard?
 
     init(service: MeetingTranscriptionService, session: DictationSession) {
         self.service = service
@@ -32,6 +33,10 @@ final class MeetingIndicatorController {
             MeetingIndicatorDotView()
         } compactTrailing: {
             MeetingIndicatorMeterView(service: service)
+        }
+
+        strayGuard = NotchStrayWindowGuard(notch: notch) { [weak service] in
+            !(service?.isListening ?? false)
         }
 
         // Show/hide with the meeting session…

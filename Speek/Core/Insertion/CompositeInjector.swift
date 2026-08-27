@@ -28,12 +28,20 @@ final class CompositeInjector: TextInjector {
             return try await fallback.insert(text)
         }
 
-        // Wake up the front app's AX tree if it's an Electron/Chromium host —
-        // their accessibility trees are dormant by default and refuse to
-        // expose text-input roles until we set these attributes.
-        Self.coaxFrontmostAppAX()
+        let insertStart = CFAbsoluteTimeGetCurrent()
 
-        switch Self.focusedElementVerdict() {
+        // Ask the AX tree FIRST, and only coax when it doesn't answer with an
+        // editable target. The coax (AXEnhancedUserInterface) forces
+        // Chromium/Electron/web views to build their complete accessibility
+        // tree — on content-heavy documents that costs whole seconds, and we
+        // used to pay it on EVERY insertion. Native apps answer without it;
+        // dormant Electron trees get coaxed exactly once per process.
+        var verdict = Self.focusedElementVerdict()
+        if verdict != .editable, Self.coaxFrontmostAppAXIfNeeded() {
+            verdict = Self.focusedElementVerdict()
+        }
+
+        switch verdict {
         case .editable:
             break // continue to the AX → keystroke insertion flow below
 
@@ -73,15 +81,17 @@ final class CompositeInjector: TextInjector {
         if useAX && !axBlocked {
             do {
                 let result = try await primary.insert(adjusted)
-                log.debug("AX injection succeeded")
+                log.info("AX injection succeeded in \(Self.elapsedMs(since: insertStart))ms")
                 return result
             } catch {
-                log.debug("AX injection failed (\(String(describing: error))) — falling back to synthesized keystrokes")
+                log.info("AX injection failed after \(Self.elapsedMs(since: insertStart))ms (\(String(describing: error))) — falling back to synthesized keystrokes")
             }
         } else if axBlocked {
             log.debug("AX skipped for known-bad bundle \(frontmostBundleID ?? "?") — using synthesized keystrokes")
         }
-        return try await fallback.insert(adjusted)
+        let result = try await fallback.insert(adjusted)
+        log.info("keystroke injection finished at \(Self.elapsedMs(since: insertStart))ms total")
+        return result
     }
 
     /// Bundle identifiers where AX reports a "successful" write but the visible
@@ -191,11 +201,30 @@ final class CompositeInjector: TextInjector {
     /// element wakes the tree so subsequent focused-element queries actually
     /// see the text input. Cheap to call every time; native Cocoa apps just
     /// ignore the unknown attribute write.
-    private static func coaxFrontmostAppAX() {
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
+    /// PIDs already coaxed this session. Re-setting the attributes is wasted
+    /// IPC, and AXEnhancedUserInterface in particular can retrigger expensive
+    /// accessibility-tree work in web views. Both attributes stick for the
+    /// lifetime of the target process, so once is enough.
+    private static let coaxedPids = OSAllocatedUnfairLock<Set<pid_t>>(initialState: [])
+
+    /// Wakes up the front app's AX tree if it's an Electron/Chromium host —
+    /// their accessibility trees are dormant by default and refuse to expose
+    /// text-input roles until these attributes are set. Returns true when the
+    /// coax was actually performed (first time for this process), so the
+    /// caller knows a re-query is worthwhile.
+    @discardableResult
+    private static func coaxFrontmostAppAXIfNeeded() -> Bool {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
+        let firstTime = coaxedPids.withLock { $0.insert(pid).inserted }
+        guard firstTime else { return false }
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, true as CFTypeRef)
         AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, true as CFTypeRef)
+        return true
+    }
+
+    private static func elapsedMs(since start: CFAbsoluteTime) -> Int {
+        Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
     }
 
     struct FieldContext {
@@ -219,21 +248,36 @@ final class CompositeInjector: TextInjector {
         // swiftlint:disable:next force_cast
         let axElement = element as! AXUIElement
 
-        var valueRef: CFTypeRef?
         var rangeRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef)
-        AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef)
-
-        guard let value = valueRef as? String, !value.isEmpty else { return FieldContext() }
-
+        guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rangeRef else { return FieldContext() }
         var range = CFRange(location: 0, length: 0)
-        if let rangeRef = rangeRef {
-            AXValueGetValue(rangeRef as! AXValue, .cfRange, &range)
+        guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range), range.location > 0 else {
+            return FieldContext()
         }
+
+        // Read only a small window before the caret. A parameterized range
+        // read is O(window); reading kAXValue serializes the entire document
+        // over IPC — visibly slow when dictating into large existing text.
+        let window = min(16, range.location)
+        var span = CFRange(location: range.location - window, length: window)
+        if let axSpan = AXValueCreate(.cfRange, &span) {
+            var out: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(
+                axElement, kAXStringForRangeParameterizedAttribute as CFString, axSpan, &out
+            ) == .success, let windowText = out as? String, !windowText.isEmpty {
+                return contextFrom(prefix: windowText)
+            }
+        }
+
+        // Fallback for elements without parameterized text support: the old
+        // full-value read.
+        var valueRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef)
+        guard let value = valueRef as? String, !value.isEmpty else { return FieldContext() }
         let cursor = max(0, min(value.count, range.location))
         guard cursor > 0 else { return FieldContext() }
-        let prefix = String(value.prefix(cursor))
-        return contextFrom(prefix: prefix)
+        return contextFrom(prefix: String(value.prefix(cursor)))
     }
 
     /// Derives the field context from the text before the cursor. Split out

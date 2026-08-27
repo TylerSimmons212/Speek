@@ -14,13 +14,13 @@ settings:
 packages:
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio
-    from: 0.15.5
+    from: 0.15.6
   DynamicNotchKit:
     url: https://github.com/MrKai77/DynamicNotchKit
     from: 1.1.0
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    from: 2.9.4
+    from: 2.9.6
 targets:
   Speek:
     type: application

@@ -13,6 +13,7 @@ final class NotchOverlayController {
     private let notch: DynamicNotch<NotchOverlayView, EmptyView, EmptyView>
     private var cancellables = Set<AnyCancellable>()
     private var hideTask: Task<Void, Never>?
+    private var strayGuard: NotchStrayWindowGuard?
 
     init(session: DictationSession) {
         // hoverBehavior .keepVisible keeps the notch open while the mouse is
@@ -33,6 +34,10 @@ final class NotchOverlayController {
             .removeDuplicates()
             .sink { [weak self] state in self?.react(to: state) }
             .store(in: &cancellables)
+
+        strayGuard = NotchStrayWindowGuard(notch: notch) { [weak session] in
+            (session?.state ?? .idle) == .idle && CorrectionLearner.shared.lastLearned == nil
+        }
 
         // The learned-word pill shows after the session is back to idle, so it
         // needs its own visibility trigger.
