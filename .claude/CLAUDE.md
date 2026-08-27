@@ -1,13 +1,18 @@
 # Speek — Project Context
 
 Native **macOS dictation** app. Push-to-talk, fully **on-device**: transcription
-via FluidAudio (Parakeet TDT v2), formatting via a hybrid of regex + Apple
-Foundation Models. Portable code project — work on it directly in this repo on
-any device.
+via FluidAudio (Parakeet TDT v2), transcript cleanup via `S1PolishStage` —
+s1-mini ("S1-mini" by Superwhisper, a 0.6B Qwen3 fine-tune, official Q4_K_M
+GGUF run through llama.cpp/Metal) — preceded by a slim `RuleStage` (custom
+vocabulary + dictated punctuation commands only). Also ships meeting
+transcription (system-audio tap → Parakeet → FluidAudio speaker diarization)
+and Read Aloud (Kokoro-82M TTS via FluidAudio). Settings persist in
+`UserDefaults` via `SyncStore`. Portable code project — work on it directly in
+this repo on any device.
 
 ## Requirements
 
-- macOS 26 (Tahoe)+, Apple Silicon, Apple Intelligence enabled
+- macOS 26 (Tahoe)+, Apple Silicon
 - `xcodegen` (`brew install xcodegen`) — the `.xcodeproj` is gitignored and
   generated from `project.yml`
 - Swift 6.0. Permissions the app needs: Microphone + Input Monitoring (global hotkey)
@@ -15,9 +20,13 @@ any device.
 ## First-time setup
 
 ```bash
-cd Speek && xcodegen generate && open Speek.xcodeproj
+cd Speek && ./scripts/fetch-llama.sh && xcodegen generate && open Speek.xcodeproj
 ```
-First run downloads the Parakeet model (~600 MB) to `~/Library/Caches/FluidAudio/`.
+`fetch-llama.sh` pulls the pinned llama.cpp xcframework into `Vendor/`
+(gitignored) — required before the first build. First app run downloads the
+Parakeet model (~600 MB) to `~/Library/Caches/FluidAudio/` and the s1-mini
+GGUF (~484 MB) to `~/Library/Application Support/Speek/Models/`.
+S1PolishStage integration tests skip themselves when the GGUF is absent.
 
 ## Build + test (CLI)
 

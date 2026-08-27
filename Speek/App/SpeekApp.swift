@@ -64,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         perms.refresh()
-        NSLog("Speek permissions — mic: \(perms.hasMic), accessibility: \(perms.hasAccessibility), inputMonitoring: \(perms.hasInputMonitoring), foundationModels: \(perms.hasFoundationModels)")
+        NSLog("Speek permissions — mic: \(perms.hasMic), accessibility: \(perms.hasAccessibility), inputMonitoring: \(perms.hasInputMonitoring)")
 
         // Load Parakeet (model download on first launch).
         do {
@@ -87,21 +87,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.session = session
 
         // Rebuild the pipeline whenever anything it derives from changes:
-        // custom vocabulary, polish engine/mode, or LLM connection details.
+        // custom vocabulary or the polish engine.
         let settings = SettingsStore.shared
         Publishers.MergeMany(
             settings.$customReplacements.dropFirst().map { _ in () }.eraseToAnyPublisher(),
-            settings.$polishEngine.dropFirst().map { _ in () }.eraseToAnyPublisher(),
-            settings.$polishMode.dropFirst().map { _ in () }.eraseToAnyPublisher(),
-            settings.$llmEndpoint.dropFirst().map { _ in () }.eraseToAnyPublisher(),
-            settings.$llmModel.dropFirst().map { _ in () }.eraseToAnyPublisher(),
-            settings.$llmAPIKey.dropFirst().map { _ in () }.eraseToAnyPublisher()
+            settings.$polishEngine.dropFirst().map { _ in () }.eraseToAnyPublisher()
         )
         .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
         .sink { [weak self] in
             self?.session?.pipeline = Self.makePipeline(with: SettingsStore.shared.customReplacements)
+            Self.applyPolishEngineChange()
         }
         .store(in: &cancellables)
+
+        // s1-mini: fetch weights if needed and pre-load so the first
+        // dictation doesn't pay the model-load cost. When the download
+        // finishes (first launch), load then too.
+        if settings.polishEngine == .s1Mini {
+            S1ModelStore.shared.ensureDownloaded()
+        }
+        S1ModelStore.shared.$state
+            .filter { $0 == .ready }
+            .sink { _ in
+                guard SettingsStore.shared.polishEngine == .s1Mini else { return }
+                Task { await S1PolishStage.shared.prepare() }
+            }
+            .store(in: &cancellables)
         self.menuBar = MenuBarController(session: session)
         buildOverlay(style: SettingsStore.shared.overlayStyle, session: session)
 
@@ -240,25 +251,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///     discarded (no transcription).
     ///   - Any press while latched in toggle mode ends the recording.
     private static func makePipeline(with vocabulary: [String: String]) -> FormattingPipeline {
-        let settings = SettingsStore.shared
         let polish: any PolishStage
-        switch settings.polishEngine {
+        switch SettingsStore.shared.polishEngine {
         case .off:
             polish = NullPolishStage()
-        case .appleIntelligence:
-            polish = FMPolishStage()
-        case .customLLM:
-            polish = LLMPolishStage(config: .init(
-                endpoint: settings.llmEndpoint,
-                model: settings.llmModel,
-                apiKey: settings.llmAPIKey
-            ))
+        case .s1Mini:
+            polish = S1PolishStage.shared
         }
         return FormattingPipeline(
             rule: RuleStage(customReplacements: vocabulary),
-            polish: polish,
-            mode: settings.polishMode
+            polish: polish
         )
+    }
+
+    /// Keeps the resident model in sync with the engine setting: loading it
+    /// when s1-mini is selected, freeing ~500 MB when polish is turned off.
+    private static func applyPolishEngineChange() {
+        switch SettingsStore.shared.polishEngine {
+        case .s1Mini:
+            S1ModelStore.shared.ensureDownloaded()
+            if S1ModelStore.isModelPresent {
+                Task { await S1PolishStage.shared.prepare() }
+            }
+        case .off:
+            Task { await S1PolishStage.shared.unload() }
+        }
     }
 
     /// Tears down whichever overlay is active and builds the requested style.

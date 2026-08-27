@@ -34,6 +34,8 @@ targets:
         product: DynamicNotchKit
       - package: Sparkle
         product: Sparkle
+      - framework: Vendor/llama.xcframework
+        embed: true
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

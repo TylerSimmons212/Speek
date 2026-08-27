@@ -22,6 +22,25 @@ final class DictationSessionTests: XCTestCase {
         XCTAssertEqual(captured.received, "Hello world")
         XCTAssertEqual(session.state, .idle)
     }
+
+    func test_filler_only_dictation_inserts_nothing() async throws {
+        let audio = AudioCaptureService()
+        let stub = StubTranscriber(text: "um uh") // normalizes to nothing
+        let pipeline = FormattingPipeline(rule: RuleStage(), polish: NoopPolish())
+        let captured = CapturingInjector()
+        let session = DictationSession(
+            audio: audio,
+            transcriber: stub,
+            pipeline: pipeline,
+            injector: captured
+        )
+
+        session._setStateForTesting(.recording)
+        await session.stopRecording()
+
+        XCTAssertNil(captured.received)
+        XCTAssertEqual(session.state, .idle)
+    }
 }
 
 actor StubTranscriber: TranscriptionEngine {
@@ -32,9 +51,7 @@ actor StubTranscriber: TranscriptionEngine {
 
 actor NoopPolish: PolishStage {
     var isAvailable: Bool { false }
-    func run(_ input: String, context: PolishContext?) async -> PolishResult {
-        PolishResult(text: input, mergedFragment: false)
-    }
+    func run(_ input: String) async -> String { input }
 }
 
 final class CapturingInjector: TextInjector, @unchecked Sendable {

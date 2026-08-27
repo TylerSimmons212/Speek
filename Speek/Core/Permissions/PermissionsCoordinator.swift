@@ -2,7 +2,6 @@ import AVFoundation
 import AppKit
 import ApplicationServices
 import Foundation
-import FoundationModels
 import IOKit.hid
 
 @MainActor
@@ -12,13 +11,11 @@ final class PermissionsCoordinator: ObservableObject {
     @Published var hasMic: Bool = false
     @Published var hasAccessibility: Bool = false
     @Published var hasInputMonitoring: Bool = false
-    @Published var hasFoundationModels: Bool = false
 
     func refresh() {
         hasMic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         hasAccessibility = AXIsProcessTrusted()
         hasInputMonitoring = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
-        hasFoundationModels = SystemLanguageModel.default.isAvailable
     }
 
     func requestMic() async {

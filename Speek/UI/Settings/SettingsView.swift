@@ -282,13 +282,6 @@ private struct PermissionsPane: View {
                         perms.openSystemSettings(.inputMonitoring)
                     }
                 )
-                PermissionRow(
-                    title: "Apple Foundation Models",
-                    icon: "sparkles",
-                    granted: perms.hasFoundationModels,
-                    detail: "Optional. Enable Apple Intelligence in System Settings to use the LLM polish stage.",
-                    action: nil
-                )
             }
             if !perms.hasAccessibility || !perms.hasInputMonitoring {
                 Section("Troubleshooting") {
@@ -396,58 +389,20 @@ private struct FormattingPane: View {
     @ObservedObject var settings = SettingsStore.shared
     @State private var newKey = ""
     @State private var newValue = ""
-    @State private var probeResult: String?
-    @State private var probing = false
 
     var body: some View {
         Form {
             Section("AI polish") {
                 Picker("Engine", selection: $settings.polishEngine) {
                     Text("Off").tag(SettingsStore.PolishEngine.off)
-                    Text("Apple Intelligence").tag(SettingsStore.PolishEngine.appleIntelligence)
-                    Text("Custom (OpenAI-compatible)").tag(SettingsStore.PolishEngine.customLLM)
+                    Text("S1-mini (on-device)").tag(SettingsStore.PolishEngine.s1Mini)
                 }
-                Text("Cleans up what the regex layer can't: subtle self-corrections, grammar, spoken numbers. Custom works with Ollama or LM Studio running locally — free and private — or any cloud provider.")
+                Text("S1-mini by Superwhisper — a small on-device model built for dictation cleanup: removes fillers, resolves self-corrections, fixes punctuation, and writes out spoken numbers and dates. Nothing leaves your Mac.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if settings.polishEngine != .off {
-                    Picker("Run", selection: $settings.polishMode) {
-                        Text("Only when needed").tag(SettingsStore.PolishMode.whenNeeded)
-                        Text("On every dictation").tag(SettingsStore.PolishMode.always)
-                    }
-                }
-                if settings.polishEngine == .customLLM {
-                    TextField("Endpoint", text: $settings.llmEndpoint, prompt: Text("http://localhost:11434/v1"))
-                        .autocorrectionDisabled()
-                    TextField("Model", text: $settings.llmModel, prompt: Text("llama3.2"))
-                        .autocorrectionDisabled()
-                    SecureField("API key (not needed for local endpoints)", text: $settings.llmAPIKey)
-                    HStack(spacing: 10) {
-                        Button(probing ? "Testing…" : "Test connection") {
-                            probing = true
-                            probeResult = nil
-                            let config = LLMPolishStage.Config(
-                                endpoint: settings.llmEndpoint,
-                                model: settings.llmModel,
-                                apiKey: settings.llmAPIKey
-                            )
-                            Task {
-                                let outcome = await LLMPolishStage.probe(config: config)
-                                await MainActor.run {
-                                    probeResult = outcome
-                                    probing = false
-                                }
-                            }
-                        }
-                        .disabled(probing)
-                        if let probeResult {
-                            Text(probeResult)
-                                .font(.callout)
-                                .foregroundStyle(probeResult.hasPrefix("Connected") ? .green : .orange)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
+                if settings.polishEngine == .s1Mini {
+                    S1ModelRow()
                 }
             }
             Section("Insertion") {
@@ -563,5 +518,45 @@ private struct AboutPane: View {
     }
     private var buildNumber: String {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+    }
+}
+
+/// Download status row for the s1-mini weights (~484 MB, one-time).
+private struct S1ModelRow: View {
+    @ObservedObject var store = S1ModelStore.shared
+
+    var body: some View {
+        HStack(spacing: 10) {
+            switch store.state {
+            case .notDownloaded:
+                Button("Download model (484 MB)") {
+                    store.ensureDownloaded()
+                }
+                Text("One-time download; cached locally after that.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            case .downloading(let progress):
+                ProgressView(value: progress)
+                    .frame(maxWidth: 180)
+                Text("Downloading… \(Int(progress * 100))%")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            case .ready:
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("Model ready")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            case .failed(let message):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Button("Retry") { store.retry() }
+            }
+        }
     }
 }
