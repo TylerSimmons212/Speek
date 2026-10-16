@@ -1,6 +1,7 @@
 import Accelerate
 import AVFoundation
 import Darwin
+import FluidAudio
 import XCTest
 @testable import Speek
 
@@ -15,6 +16,9 @@ import XCTest
 /// hears) and near.wav/.rttm (the local user). The first run downloads the
 /// FluidAudio diarization and LocalVQE models. Results print to the log and
 /// land in SPEEK_BENCH_DIR as JSON.
+///
+/// scripts/make-ami-fixture.py builds the same layout from a real AMI
+/// meeting (overlapped speech, no local user) for the speaker-label tests.
 final class MeetingSpeakerBenchmarkTests: XCTestCase {
     typealias R = OfflineSpeakerRelabeler
     private static let rate = 16_000
@@ -70,16 +74,53 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
         let duration = Double(far.count) / Double(Self.rate)
         let liveScore = Self.score(items: items, labels: live, truth: truth, duration: duration)
         let offlineScore = Self.score(items: items, labels: offline, truth: truth, duration: duration)
+        // The one-label-per-segment ceiling: every segment carries its true
+        // dominant speaker. Its transcript DER is what window granularity
+        // and overlapped speech leave for any relabeling to fix.
+        let oracle = items.map { R.dominantSpeaker(for: $0.span, in: truth) }
+        let oracleScore = Self.score(items: items, labels: oracle, truth: truth, duration: duration)
         let rawDER = Self.frameDER(hypothesis: turns, truth: truth, duration: duration)
+        let rawDERSingle = Self.frameDER(hypothesis: turns, truth: truth, duration: duration, skipOverlap: true)
+
+        // FluidAudio trims overlap out of its turns by default (each turn
+        // starts where the previous one ended, so an interjection inside a
+        // longer turn vanishes). Score the overlap-preserving output too.
+        var overlapConfig = OfflineDiarizerConfig.default
+        overlapConfig.exclusiveSegments = false
+        let overlapping = OfflineDiarizerManager(config: overlapConfig)
+        overlapping.initialize(models: models)
+        let overlapTurns = try await overlapping.process(audioSource: source, audioLoadingSeconds: 0).segments.map {
+            R.Turn(speakerId: $0.speakerId, start: TimeInterval($0.startTimeSeconds), end: TimeInterval($0.endTimeSeconds))
+        }
+        let overlapLabels = try XCTUnwrap(R.relabel(items: items, turns: overlapTurns))
+        let overlapScore = Self.score(items: items, labels: overlapLabels, truth: truth, duration: duration)
+        let spanSeconds = items.map { $0.span.end - $0.span.start }.sorted()
+        func quantile(_ q: Double) -> Double {
+            spanSeconds.isEmpty ? 0 : spanSeconds[Int(q * Double(spanSeconds.count - 1))]
+        }
 
         let report: [String: Any] = [
             "audioMinutes": duration / 60,
             "truthSpeakers": Set(truth.map(\.speakerId)).count,
+            "truthOverlapShare": Self.overlapShare(truth, duration: duration),
             "remoteSegments": items.count,
+            "remoteSegmentSeconds": ["median": quantile(0.5), "p90": quantile(0.9), "max": quantile(1)],
             "live": liveScore.json + ["seconds": liveSeconds],
             "offlineRelabel": offlineScore.json + ["seconds": offlineSeconds],
+            "oracleDominantSpeaker": oracleScore.json,
             "offlineDiarizerFrameDER": rawDER.json,
+            "offlineDiarizerFrameDERSkipOverlap": rawDERSingle.json,
+            "offlineOverlapShare": Self.overlapShare(turns, duration: duration),
             "offlineSpeakers": Set(turns.map(\.speakerId)).count,
+            "nonExclusive": [
+                "relabel": overlapScore.json,
+                "diarizerFrameDER": Self.frameDER(hypothesis: overlapTurns, truth: truth, duration: duration).json,
+                "diarizerFrameDERSkipOverlap": Self.frameDER(
+                    hypothesis: overlapTurns, truth: truth, duration: duration, skipOverlap: true
+                ).json,
+                "overlapShare": Self.overlapShare(overlapTurns, duration: duration),
+                "speakers": Set(overlapTurns.map(\.speakerId)).count,
+            ] as [String: Any],
         ]
         try Self.write(report, named: "labels", in: dir)
         XCTAssertLessThanOrEqual(offlineScore.segmentError, liveScore.segmentError + 0.02)
@@ -398,13 +439,17 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
         var unlabeled: Double
         /// Frame-level DER of the transcript as written: every segment's
         /// whole span carries its label. Miss/false alarm come from window
-        /// boundaries (identical for both labelings); confusion is the label.
+        /// boundaries and overlapped speech (one label per segment), both
+        /// identical for every labeling; confusion is the label.
         var transcriptDER: DER
+        /// The same, scored only where the reference has at most one speaker.
+        var transcriptDERSkipOverlap: DER
         var labels: Int
 
         var json: [String: Any] {
             ["segmentSpeakerError": segmentError, "unlabeledShare": unlabeled,
-             "transcriptDER": transcriptDER.json, "distinctLabels": labels]
+             "transcriptDER": transcriptDER.json, "transcriptDERSkipOverlap": transcriptDERSkipOverlap.json,
+             "distinctLabels": labels]
         }
     }
 
@@ -440,6 +485,10 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
             segmentError: total > 0 ? 1 - correct / total : 0,
             unlabeled: total > 0 ? unlabeled / total : 0,
             transcriptDER: frameDER(hypothesis: spans + anonymous, truth: truth, duration: duration, unmappable: ["\u{0}them"]),
+            transcriptDERSkipOverlap: frameDER(
+                hypothesis: spans + anonymous, truth: truth, duration: duration,
+                unmappable: ["\u{0}them"], skipOverlap: true
+            ),
             labels: hypIds.count
         )
     }
@@ -454,32 +503,29 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
 
     /// Frame-level (10 ms, no collar) diarization error rate: missed +
     /// false-alarm + confused speaker time over reference speech time, with
-    /// the best one-to-one hypothesis→reference speaker mapping.
-    static func frameDER(hypothesis: [R.Turn], truth: [R.Turn], duration: TimeInterval, unmappable: Set<String> = []) -> DER {
+    /// the best one-to-one hypothesis→reference speaker mapping. Frames with
+    /// several reference speakers count each one (the full AMI/DIHARD DER);
+    /// `skipOverlap` drops those frames entirely, like pyannote.metrics'
+    /// `skip_overlap`.
+    static func frameDER(
+        hypothesis: [R.Turn], truth: [R.Turn], duration: TimeInterval,
+        unmappable: Set<String> = [], skipOverlap: Bool = false
+    ) -> DER {
         let frames = Int(duration * 100) + 1
-        func grid(_ turns: [R.Turn], ids: [String]) -> [[Int]] {
-            var g = [[Int]](repeating: [], count: frames)
-            for turn in turns {
-                guard let id = ids.firstIndex(of: turn.speakerId) else { continue }
-                let a = max(0, Int((turn.start * 100).rounded()))
-                let b = min(frames, Int((turn.end * 100).rounded()))
-                if a < b { for f in a..<b where !g[f].contains(id) { g[f].append(id) } }
-            }
-            return g
-        }
         let refIds = Array(Set(truth.map(\.speakerId))).sorted()
         let hypIds = Array(Set(hypothesis.map(\.speakerId))).sorted()
-        let ref = grid(truth, ids: refIds)
-        let hyp = grid(hypothesis, ids: hypIds)
+        let ref = frameGrid(truth, ids: refIds, frames: frames)
+        let hyp = frameGrid(hypothesis, ids: hypIds, frames: frames)
+        let scored = (0..<frames).filter { !skipOverlap || ref[$0].count <= 1 }
         var weights = [[Double]](repeating: [Double](repeating: 0, count: refIds.count), count: hypIds.count)
-        for f in 0..<frames {
+        for f in scored {
             for h in hyp[f] where !unmappable.contains(hypIds[h]) {
                 for r in ref[f] { weights[h][r] += 1 }
             }
         }
         let mapping = optimalMapping(weights)
         var miss = 0, falseAlarm = 0, confusion = 0, speech = 0
-        for f in 0..<frames {
+        for f in scored {
             let nRef = ref[f].count
             let nHyp = hyp[f].count
             speech += nRef
@@ -491,6 +537,26 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
         guard speech > 0 else { return DER() }
         let s = Double(speech)
         return DER(miss: Double(miss) / s, falseAlarm: Double(falseAlarm) / s, confusion: Double(confusion) / s)
+    }
+
+    /// Speaker indices active in each 10 ms frame.
+    static func frameGrid(_ turns: [R.Turn], ids: [String], frames: Int) -> [[Int]] {
+        var g = [[Int]](repeating: [], count: frames)
+        for turn in turns {
+            guard let id = ids.firstIndex(of: turn.speakerId) else { continue }
+            let a = max(0, Int((turn.start * 100).rounded()))
+            let b = min(frames, Int((turn.end * 100).rounded()))
+            if a < b { for f in a..<b where !g[f].contains(id) { g[f].append(id) } }
+        }
+        return g
+    }
+
+    /// Share of speech frames where two or more speakers are active.
+    static func overlapShare(_ turns: [R.Turn], duration: TimeInterval) -> Double {
+        let ids = Array(Set(turns.map(\.speakerId))).sorted()
+        let grid = frameGrid(turns, ids: ids, frames: Int(duration * 100) + 1)
+        let speech = grid.filter { !$0.isEmpty }.count
+        return speech > 0 ? Double(grid.filter { $0.count > 1 }.count) / Double(speech) : 0
     }
 
     /// Best one-to-one assignment (rows → columns) maximizing total weight.
