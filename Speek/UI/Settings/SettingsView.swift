@@ -440,7 +440,7 @@ private struct FormattingPane: View {
             }
             Section("Custom vocabulary") {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Replace spoken words with the spelling you want. Match is case-insensitive; the replacement is used verbatim.")
+                    Text("Replace spoken words with the spelling you want. Speek also listens for these terms, so close mishearings get fixed too. Match is case-insensitive; the replacement is used verbatim.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

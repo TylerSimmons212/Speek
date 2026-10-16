@@ -4,6 +4,17 @@ protocol TranscriptionEngine: Sendable {
     /// Transcribes the full PCM buffer (16kHz mono Float32) and returns a finalized transcript.
     /// Parakeet emits punctuation; the returned string is "raw" but mostly readable.
     func transcribe(samples: [Float]) async throws -> String
+
+    /// Cheaper decode for live previews, which re-transcribe the growing
+    /// buffer every tick. Engines may skip post-passes (vocabulary
+    /// rescoring) here; the final `transcribe` still applies them.
+    func transcribePreview(samples: [Float]) async throws -> String
+}
+
+extension TranscriptionEngine {
+    func transcribePreview(samples: [Float]) async throws -> String {
+        try await transcribe(samples: samples)
+    }
 }
 
 /// Stand-in used when the real engine failed to load (e.g. first launch with
