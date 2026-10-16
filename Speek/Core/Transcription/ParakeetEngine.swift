@@ -16,6 +16,12 @@ import Foundation
 /// We use a fresh `TdtDecoderState` per call because Speek transcribes whole
 /// utterances in batch (Fn release → full buffer → text) — there's no
 /// streaming continuity to preserve across calls.
+///
+/// Custom vocabulary is applied acoustically: when the user has boostable
+/// terms, `transcribe` rescores the TDT transcript against a separate CTC
+/// encoder's log-probs (FluidAudio's `VocabularyBoostingSession`, the stable
+/// "Approach 2" for TDT v2, which has no CTC head). RuleStage's string
+/// replacement still runs afterwards as the exact-match second pass.
 final class ParakeetEngine: TranscriptionEngine {
     enum EngineError: Error {
         case modelNotReady
@@ -23,6 +29,7 @@ final class ParakeetEngine: TranscriptionEngine {
 
     private let manager: AsrManager
     private let decoderLayers: Int
+    let vocabulary = VocabularyBooster()
 
     init() async throws {
         let models = try await AsrModels.downloadAndLoad(version: .v2)
@@ -32,22 +39,60 @@ final class ParakeetEngine: TranscriptionEngine {
         self.decoderLayers = await manager.decoderLayerCount
     }
 
+    /// Final decode: TDT, then vocabulary rescoring when boosting is active
+    /// and the transcript has a span close enough to a term to be rescored.
     func transcribe(samples: [Float]) async throws -> String {
         try await transcribeWithWordTimings(samples: samples).text
     }
 
-    /// Word timings come from the TDT decoder's token timings (encoder
-    /// frames, 80 ms), grouped into words on SentencePiece boundaries —
-    /// the same grouping that turns tokens into `text`.
+    /// The final decode with word timings. Timings come from the TDT
+    /// decoder's token timings (encoder frames, 80 ms), grouped into words on
+    /// SentencePiece boundaries — the same grouping that turns tokens into
+    /// `text`. Vocabulary rescoring may change the word count; TimedTranscript
+    /// re-aligns the timings when it does.
     func transcribeWithWordTimings(samples: [Float]) async throws -> TimedTranscript {
-        var decoderState = try TdtDecoderState(decoderLayers: decoderLayers)
-        let result = try await manager.transcribe(samples, decoderState: &decoderState, language: nil)
+        let result = try await decode(samples)
         let words = buildWordTimings(from: result.tokenTimings ?? []).map {
             TimedTranscript.Word(start: $0.startTime, end: $0.endTime)
         }
-        return TimedTranscript(
-            text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
-            decodedWords: words
-        )
+        let text = await applyingVocabulary(to: result, samples: samples)
+        return TimedTranscript(text: text, decodedWords: words)
+    }
+
+    /// Rescores the TDT transcript against the custom vocabulary, or returns
+    /// it unchanged when boosting is off or nothing is close to a term.
+    private func applyingVocabulary(to result: ASRResult, samples: [Float]) async -> String {
+        guard let boost = await vocabulary.active(),
+              let timings = result.tokenTimings, !timings.isEmpty,
+              boost.policy.hasCandidate(in: result.text),
+              let rescored = await boost.session.rescore(
+                  text: result.text, tokenTimings: timings, audioSamples: samples
+              )
+        else { return Self.clean(result.text) }
+
+        let applied = rescored.replacements.compactMap { r in
+            r.shouldReplace
+                ? r.replacementWord.map { VocabularyRescorePolicy.Replacement(span: r.originalWord, term: $0) }
+                : nil
+        }
+        guard !applied.isEmpty else { return Self.clean(result.text) }
+        let text = boost.policy.splice(applied, into: result.text)
+        NSLog("ParakeetEngine: vocabulary rescoring applied \(applied.map { "'\($0.span)' → '\($0.term)'" })")
+        return Self.clean(text)
+    }
+
+    /// Preview decode: TDT only. Live previews re-decode the growing buffer
+    /// every tick, so they skip the CTC pass; the final decode applies it.
+    func transcribePreview(samples: [Float]) async throws -> String {
+        Self.clean(try await decode(samples).text)
+    }
+
+    private func decode(_ samples: [Float]) async throws -> ASRResult {
+        var decoderState = try TdtDecoderState(decoderLayers: decoderLayers)
+        return try await manager.transcribe(samples, decoderState: &decoderState, language: nil)
+    }
+
+    private static func clean(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

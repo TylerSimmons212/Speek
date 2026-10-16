@@ -142,7 +142,7 @@ final class DictationSession: ObservableObject {
             guard snapshot.count >= previewMinSamples else { continue }
             // Preview failures are non-events — skip the tick and let the
             // next one try again.
-            guard let text = try? await transcriber.transcribe(samples: snapshot) else { continue }
+            guard let text = try? await transcriber.transcribePreview(samples: snapshot) else { continue }
             guard !Task.isCancelled, state == .recording else { return }
             let display = merger.merge(text)
             if !display.isEmpty { partialText = display }

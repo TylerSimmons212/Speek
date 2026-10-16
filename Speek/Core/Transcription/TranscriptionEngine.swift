@@ -9,12 +9,21 @@ protocol TranscriptionEngine: Sendable {
     /// Meeting mode uses the timings to split a segment where the speaker
     /// changes mid-window.
     func transcribeWithWordTimings(samples: [Float]) async throws -> TimedTranscript
+
+    /// Cheaper decode for live previews, which re-transcribe the growing
+    /// buffer every tick. Engines may skip post-passes (vocabulary
+    /// rescoring) here; the final `transcribe` still applies them.
+    func transcribePreview(samples: [Float]) async throws -> String
 }
 
 extension TranscriptionEngine {
     /// Engines without timings return the text alone; segments then stay whole.
     func transcribeWithWordTimings(samples: [Float]) async throws -> TimedTranscript {
         TimedTranscript(text: try await transcribe(samples: samples), decodedWords: [])
+    }
+
+    func transcribePreview(samples: [Float]) async throws -> String {
+        try await transcribe(samples: samples)
     }
 }
 

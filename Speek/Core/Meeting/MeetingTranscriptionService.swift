@@ -372,7 +372,7 @@ final class MeetingTranscriptionService: ObservableObject {
                     // inline, so a slow decode naturally throttles the cadence
                     // (same backpressure design as the dictation preview).
                     let snapshot = self.window16k
-                    if let text = try? await transcriber.transcribe(samples: snapshot) {
+                    if let text = try? await transcriber.transcribePreview(samples: snapshot) {
                         guard self.livePreviewActive else { continue }
                         self.livePartial = self.partialMerger.merge(text)
                     }

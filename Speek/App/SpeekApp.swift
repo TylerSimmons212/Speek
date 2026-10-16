@@ -103,6 +103,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         .store(in: &cancellables)
 
+        // Acoustic vocabulary boosting follows the same vocabulary. Edits in
+        // Settings and words CorrectionLearner learns both land in
+        // customReplacements. The CTC encoder downloads only once a boostable
+        // term exists, and unloads when the vocabulary empties.
+        if let parakeet = self.transcriber {
+            let booster = parakeet.vocabulary
+            let initial = settings.customReplacements
+            Task { await booster.update(replacements: initial) }
+            settings.$customReplacements
+                .dropFirst()
+                .removeDuplicates()
+                .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+                .sink { replacements in
+                    Task { await booster.update(replacements: replacements) }
+                }
+                .store(in: &cancellables)
+        }
+
         // Apple speech assets for the live preview tier (system-managed
         // download; no-op once installed).
         Task { await SpeechPreviewEngine.shared.prepare() }
