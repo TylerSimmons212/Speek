@@ -77,6 +77,12 @@ final class SettingsStore: ObservableObject {
     @Published var meetingConsentAcknowledged: Bool {
         didSet { sync.setBool(meetingConsentAcknowledged, forKey: "meetingConsent") }
     }
+    /// Beta: LocalVQE echo cancellation on the meeting mic track, using the
+    /// system-audio tap as the far-end reference. Off by default; read at
+    /// meeting start.
+    @Published var meetingEchoCancellation: Bool {
+        didSet { sync.setBool(meetingEchoCancellation, forKey: "meetingEchoCancellation") }
+    }
     /// Optional read-aloud trigger key (tap to read the selection, tap again
     /// to stop). Nil = no hotkey; the Service and menu bar still work.
     @Published var readAloudBinding: HotkeyBinding? {
@@ -134,6 +140,7 @@ final class SettingsStore: ObservableObject {
             : true
         self.onboardingCompleted = sync.bool(forKey: "onboardingCompleted")
         self.meetingConsentAcknowledged = sync.bool(forKey: "meetingConsent")
+        self.meetingEchoCancellation = sync.bool(forKey: "meetingEchoCancellation")
         if let json = sync.string(forKey: "readAloudBinding"), !json.isEmpty,
            let binding = HotkeyBinding.from(jsonString: json) {
             self.readAloudBinding = binding

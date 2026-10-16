@@ -375,6 +375,24 @@ private struct AudioPane: View {
                     }
                 }
             }
+            Section("Meeting transcription") {
+                Toggle(isOn: $settings.meetingEchoCancellation) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("Echo cancellation").font(.body.weight(.medium))
+                            Text("Beta")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(.quaternary, in: Capsule())
+                        }
+                        Text("For calls without headphones: removes the other side's voice that your mic picks up from the speakers, so it isn't transcribed twice as \u{201C}You.\u{201D} Downloads a 19 MB model on first use. Applies from the next meeting.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
             Section("Microphone") {
                 Picker("Input device", selection: $settings.micDeviceID) {
                     Text("System default").tag("default")
@@ -440,7 +458,7 @@ private struct FormattingPane: View {
             }
             Section("Custom vocabulary") {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Replace spoken words with the spelling you want. Match is case-insensitive; the replacement is used verbatim.")
+                    Text("Replace spoken words with the spelling you want. Speek also listens for these terms, so close mishearings get fixed too. Match is case-insensitive; the replacement is used verbatim.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

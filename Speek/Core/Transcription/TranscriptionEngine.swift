@@ -4,6 +4,63 @@ protocol TranscriptionEngine: Sendable {
     /// Transcribes the full PCM buffer (16kHz mono Float32) and returns a finalized transcript.
     /// Parakeet emits punctuation; the returned string is "raw" but mostly readable.
     func transcribe(samples: [Float]) async throws -> String
+
+    /// The same final decode, plus where each word sits in `samples`.
+    /// Meeting mode uses the timings to split a segment where the speaker
+    /// changes mid-window.
+    func transcribeWithWordTimings(samples: [Float]) async throws -> TimedTranscript
+
+    /// Cheaper decode for live previews, which re-transcribe the growing
+    /// buffer every tick. Engines may skip post-passes (vocabulary
+    /// rescoring) here; the final `transcribe` still applies them.
+    func transcribePreview(samples: [Float]) async throws -> String
+}
+
+extension TranscriptionEngine {
+    /// Engines without timings return the text alone; segments then stay whole.
+    func transcribeWithWordTimings(samples: [Float]) async throws -> TimedTranscript {
+        TimedTranscript(text: try await transcribe(samples: samples), decodedWords: [])
+    }
+
+    func transcribePreview(samples: [Float]) async throws -> String {
+        try await transcribe(samples: samples)
+    }
+}
+
+/// A transcript and the timing of each of its words.
+struct TimedTranscript: Sendable, Equatable {
+    struct Word: Sendable, Equatable {
+        /// Seconds from the start of the decoded audio.
+        var start: TimeInterval
+        var end: TimeInterval
+    }
+
+    let text: String
+    /// One entry per whitespace-separated word of `text`, in order, or empty
+    /// when timings are unavailable.
+    let words: [Word]
+
+    /// Pairs `text` with timings for the decoder's words. When a post-pass
+    /// rewrote the text so the word counts differ (vocabulary rescoring can
+    /// merge or split words), each text word borrows the timing of the
+    /// decoder word at the same relative position.
+    init(text: String, decodedWords: [Word]) {
+        self.text = text
+        let count = Self.wordCount(text)
+        if decodedWords.isEmpty || count == 0 {
+            words = []
+        } else if decodedWords.count == count {
+            words = decodedWords
+        } else {
+            words = (0..<count).map { index in
+                decodedWords[index * decodedWords.count / count]
+            }
+        }
+    }
+
+    static func wordCount(_ text: String) -> Int {
+        text.split(whereSeparator: \.isWhitespace).count
+    }
 }
 
 /// Stand-in used when the real engine failed to load (e.g. first launch with
