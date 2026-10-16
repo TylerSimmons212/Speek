@@ -31,6 +31,23 @@ final class FormattingPipelineTests: XCTestCase {
         XCTAssertEqual(result, "")
     }
 
+    func test_passes_style_through_to_polish() async {
+        let polish = StubPolish(transform: { $0 })
+        let pipeline = FormattingPipeline(rule: RuleStage(), polish: polish)
+        let style = PolishStyle(styling: .semiCasual, structure: .lists, context: .email)
+        _ = await pipeline.run("hello", style: style)
+        let received = await polish.lastStyle
+        XCTAssertEqual(received, style)
+    }
+
+    func test_defaults_to_standard_style() async {
+        let polish = StubPolish(transform: { $0 })
+        let pipeline = FormattingPipeline(rule: RuleStage(), polish: polish)
+        _ = await pipeline.run("hello")
+        let received = await polish.lastStyle
+        XCTAssertEqual(received, .standard)
+    }
+
     func test_polish_can_legitimately_return_empty() async {
         let pipeline = FormattingPipeline(
             rule: RuleStage(),
@@ -49,5 +66,9 @@ actor StubPolish: PolishStage {
         self._isAvailable = isAvailable
     }
     var isAvailable: Bool { _isAvailable }
-    func run(_ input: String) async -> String { transform(input) }
+    private(set) var lastStyle: PolishStyle?
+    func run(_ input: String, style: PolishStyle) async -> String {
+        lastStyle = style
+        return transform(input)
+    }
 }

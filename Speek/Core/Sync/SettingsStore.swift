@@ -52,6 +52,11 @@ final class SettingsStore: ObservableObject {
     @Published var polishEngine: PolishEngine {
         didSet { sync.setString(polishEngine.rawValue, forKey: "polishEngine") }
     }
+    /// Shape polish output to the target app (chat → relaxed, mail → email
+    /// layout). See AppPolishStyle.
+    @Published var matchStyleToApp: Bool {
+        didSet { sync.setBool(matchStyleToApp, forKey: "matchStyleToApp") }
+    }
     @Published var learnFromCorrections: Bool {
         didSet { sync.setBool(learnFromCorrections, forKey: "learnFromCorrections") }
     }
@@ -123,6 +128,10 @@ final class SettingsStore: ObservableObject {
         // every legacy engine value (appleIntelligence, customLLM) moves to
         // s1-mini, which replaced both.
         self.polishEngine = sync.string(forKey: "polishEngine") == "off" ? .off : .s1Mini
+        // Default ON: the feature only touches known chat and mail apps.
+        self.matchStyleToApp = sync.hasValue(forKey: "matchStyleToApp")
+            ? sync.bool(forKey: "matchStyleToApp")
+            : true
         // Default ON: opt-out, since the diff filter is conservative.
         self.learnFromCorrections = sync.hasValue(forKey: "learnFromCorrections")
             ? sync.bool(forKey: "learnFromCorrections")

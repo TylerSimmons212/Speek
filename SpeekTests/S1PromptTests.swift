@@ -17,9 +17,31 @@ final class S1PromptTests: XCTestCase {
         XCTAssertTrue(prompt.hasSuffix("<|im_start|>assistant\n<think>\n\n</think>\n\n"))
     }
 
-    func test_prompt_styling_axis() {
-        let prompt = S1Prompt.build(transcript: "test", styling: .formal)
-        XCTAssertTrue(prompt.contains("[Styling: formal]"))
+    func test_prompt_renders_every_axis() {
+        let style = PolishStyle(styling: .semiCasual, structure: .lists, context: .email)
+        let prompt = S1Prompt.build(transcript: "test", style: style)
+        XCTAssertTrue(prompt.contains("[Styling: semi-casual] [Structure: lists] [Context: email]\ntest"))
+    }
+
+    /// The model card warns that values outside the trained sets can garble
+    /// output — pin the exact vocabulary so a rename can't drift from it.
+    func test_axis_values_match_trained_vocabulary() {
+        XCTAssertEqual(PolishStyle.Styling.allCases.map(\.rawValue), ["casual", "semi-casual", "semi-formal", "formal"])
+        XCTAssertEqual(PolishStyle.Structure.allCases.map(\.rawValue), ["prose", "lists"])
+        XCTAssertEqual(PolishStyle.Context.allCases.map(\.rawValue), ["general", "email"])
+    }
+
+    func test_single_chunk_keeps_full_style() {
+        let style = PolishStyle(styling: .semiCasual, structure: .lists, context: .email)
+        XCTAssertEqual(S1Prompt.style(style, forChunkCount: 1), style)
+    }
+
+    func test_multi_chunk_keeps_register_but_drops_layout() {
+        let style = PolishStyle(styling: .semiCasual, structure: .lists, context: .email)
+        XCTAssertEqual(
+            S1Prompt.style(style, forChunkCount: 3),
+            PolishStyle(styling: .semiCasual, structure: .prose, context: .general)
+        )
     }
 
     // MARK: Output budget

@@ -164,8 +164,11 @@ final class DictationSession: ObservableObject {
         state = .processing
 
         do {
+            // Resolved now, not at record start: the frontmost app at stop
+            // is the one CompositeInjector will insert into.
+            let style = AppPolishStyle.current()
             let raw = try await transcriber.transcribe(samples: samples)
-            let text = await pipeline.run(raw)
+            let text = await pipeline.run(raw, style: style)
             partialText = ""
             guard !text.isEmpty else {
                 // A filler-only dictation legitimately normalizes to nothing.

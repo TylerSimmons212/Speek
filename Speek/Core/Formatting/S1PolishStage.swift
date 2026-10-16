@@ -103,7 +103,7 @@ actor S1PolishStage: PolishStage {
         loadFailed = false
     }
 
-    func run(_ input: String) async -> String {
+    func run(_ input: String, style: PolishStyle) async -> String {
         guard !input.isEmpty else { return input }
         lastUsed = ContinuousClock.now
         if context == nil {
@@ -114,9 +114,11 @@ actor S1PolishStage: PolishStage {
             Task { self.prepare() }
             return input
         }
+        let chunks = S1Prompt.chunk(input)
+        let chunkStyle = S1Prompt.style(style, forChunkCount: chunks.count)
         var pieces: [String] = []
-        for chunk in S1Prompt.chunk(input) {
-            guard let cleaned = normalize(chunk) else { return input } // fail open
+        for chunk in chunks {
+            guard let cleaned = normalize(chunk, style: chunkStyle) else { return input } // fail open
             if !cleaned.isEmpty { pieces.append(cleaned) }
         }
         return pieces.joined(separator: " ")
@@ -124,11 +126,11 @@ actor S1PolishStage: PolishStage {
 
     // MARK: - Inference
 
-    private func normalize(_ transcript: String) -> String? {
+    private func normalize(_ transcript: String, style: PolishStyle) -> String? {
         guard let model, let context, let sampler else { return nil }
         let vocab = llama_model_get_vocab(model)
 
-        var promptTokens = tokenize(S1Prompt.build(transcript: transcript), vocab: vocab)
+        var promptTokens = tokenize(S1Prompt.build(transcript: transcript, style: style), vocab: vocab)
         guard !promptTokens.isEmpty else { return nil }
         let inputTokenCount = tokenize(transcript, vocab: vocab).count
         let budget = min(

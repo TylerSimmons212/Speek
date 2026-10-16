@@ -9,9 +9,11 @@ struct FormattingPipeline: Sendable {
     let rule: RuleStage
     let polish: any PolishStage
 
-    func run(_ input: String) async -> String {
+    /// `style` shapes the polish pass only (register, lists, email layout);
+    /// the rule pass is style-independent.
+    func run(_ input: String, style: PolishStyle = .standard) async -> String {
         let ruled = rule.run(input)
         guard !ruled.isEmpty, await polish.isAvailable else { return ruled }
-        return await polish.run(ruled)
+        return await polish.run(ruled, style: style)
     }
 }
