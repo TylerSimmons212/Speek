@@ -94,6 +94,8 @@ final class MenuBarController {
                 switch state {
                 case .listening:
                     self?.meetingItem?.title = "Stop Transcribing Meeting"
+                case .finalizing:
+                    self?.meetingItem?.title = "Finishing Meeting Transcript…"
                 case .idle:
                     self?.meetingItem?.title = "Transcribe Meeting Audio"
                 case .failed(let message):
@@ -119,6 +121,8 @@ final class MenuBarController {
 
     @objc private func toggleMeetingTranscription() {
         let service = MeetingTranscriptionService.shared
+        // Speaker labels are being finalized; the transcript opens when done.
+        guard !service.isFinalizing else { return }
         if service.isListening {
             Task { @MainActor in
                 if let url = await service.stop() {
