@@ -33,8 +33,21 @@ final class ParakeetEngine: TranscriptionEngine {
     }
 
     func transcribe(samples: [Float]) async throws -> String {
+        try await transcribeWithWordTimings(samples: samples).text
+    }
+
+    /// Word timings come from the TDT decoder's token timings (encoder
+    /// frames, 80 ms), grouped into words on SentencePiece boundaries —
+    /// the same grouping that turns tokens into `text`.
+    func transcribeWithWordTimings(samples: [Float]) async throws -> TimedTranscript {
         var decoderState = try TdtDecoderState(decoderLayers: decoderLayers)
         let result = try await manager.transcribe(samples, decoderState: &decoderState, language: nil)
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = buildWordTimings(from: result.tokenTimings ?? []).map {
+            TimedTranscript.Word(start: $0.startTime, end: $0.endTime)
+        }
+        return TimedTranscript(
+            text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            decodedWords: words
+        )
     }
 }

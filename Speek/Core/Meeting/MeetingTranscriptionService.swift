@@ -46,6 +46,10 @@ final class MeetingTranscriptionService: ObservableObject {
         /// Where a "Them" segment's audio sits in the session's system
         /// track (seconds), for the offline relabel. Nil for "You".
         var trackSpan: OfflineSpeakerRelabeler.Span? = nil
+        /// Track-timeline span of each whitespace-separated word of `text`,
+        /// so the offline relabel can split the segment where the speaker
+        /// changes. Empty for "You" or when the engine had no timings.
+        var wordSpans: [OfflineSpeakerRelabeler.Span] = []
     }
 
     @Published private(set) var state: State = .idle
@@ -251,12 +255,16 @@ final class MeetingTranscriptionService: ObservableObject {
                 NSLog("MeetingTranscription: offline diarization found no speech; keeping live labels")
                 return
             }
-            let changed = zip(segments, relabeled).filter { $0.speaker != $1.speaker }.count
+            // Segments kept whole keep their ID; split ones become new parts.
+            let original = Dictionary(uniqueKeysWithValues: segments.map { ($0.id, $0.speaker) })
+            let whole = relabeled.filter { $0.trackSpan != nil && original[$0.id] != nil }
+            let changed = whole.filter { original[$0.id] != $0.speaker }.count
             let remote = segments.filter { $0.trackSpan != nil }.count
+            let parts = relabeled.filter { $0.trackSpan != nil }.count - whole.count
             let speakers = Set(turns.map(\.speakerId)).count
             NSLog(String(
-                format: "MeetingTranscription: offline diarization over %.0fs of audio in %.2fs — %d speakers, %d/%d remote segments relabeled",
-                trackDuration, Date().timeIntervalSince(started), speakers, changed, remote
+                format: "MeetingTranscription: offline diarization over %.0fs of audio in %.2fs — %d speakers, %d/%d remote segments relabeled, %d split at speaker changes into %d parts",
+                trackDuration, Date().timeIntervalSince(started), speakers, changed, remote, remote - whole.count, parts
             ))
             let body = renderTranscript(relabeled, startedAt: startedAt)
             guard body != provisionalBody else { return }
@@ -272,7 +280,8 @@ final class MeetingTranscriptionService: ObservableObject {
     }
 
     /// `segments` with every "Them" segment relabeled from the offline
-    /// `turns` by maximum timestamp overlap. "You" segments are untouched.
+    /// `turns`: by maximum timestamp overlap, and split in two or more where
+    /// its words cross a speaker change. "You" segments are untouched.
     /// Nil when the offline pass found nothing (keep the live labels).
     nonisolated static func relabeledSegments(_ segments: [Segment], turns: [OfflineSpeakerRelabeler.Turn]) -> [Segment]? {
         let remote = segments.indices.filter { segments[$0].trackSpan != nil }
@@ -280,14 +289,46 @@ final class MeetingTranscriptionService: ObservableObject {
             let segment = segments[index]
             var live: String?
             if case .them(let label) = segment.speaker { live = label }
-            return OfflineSpeakerRelabeler.Item(span: segment.trackSpan!, provisionalLabel: live)
+            let aligned = TimedTranscript.wordCount(segment.text) == segment.wordSpans.count
+            return OfflineSpeakerRelabeler.Item(
+                span: segment.trackSpan!, provisionalLabel: live, words: aligned ? segment.wordSpans : []
+            )
         }
-        guard let labels = OfflineSpeakerRelabeler.relabel(items: items, turns: turns) else { return nil }
-        var result = segments
-        for (index, label) in zip(remote, labels) {
-            result[index].speaker = .them(label)
+        guard let parts = OfflineSpeakerRelabeler.relabelSplitting(items: items, turns: turns) else { return nil }
+        let partsByIndex = Dictionary(uniqueKeysWithValues: zip(remote, parts))
+        var result: [Segment] = []
+        result.reserveCapacity(segments.count)
+        for (index, segment) in segments.enumerated() {
+            guard let segmentParts = partsByIndex[index] else {
+                result.append(segment)
+                continue
+            }
+            result += split(segment, into: segmentParts)
         }
         return result
+    }
+
+    /// One segment per part: the part's words of `text`, its label, and a
+    /// timestamp moved to where its first word starts. A single part
+    /// relabels the segment in place.
+    nonisolated static func split(_ segment: Segment, into parts: [OfflineSpeakerRelabeler.Part]) -> [Segment] {
+        let words = segment.text.split(whereSeparator: \.isWhitespace)
+        guard parts.count > 1, let span = segment.trackSpan, words.count == segment.wordSpans.count else {
+            var whole = segment
+            whole.speaker = .them(parts.first?.label)
+            return [whole]
+        }
+        return parts.enumerated().map { position, part in
+            let start = position == 0 ? span.start : segment.wordSpans[part.words.lowerBound].start
+            let end = position == parts.count - 1 ? span.end : segment.wordSpans[parts[position + 1].words.lowerBound].start
+            return Segment(
+                offset: segment.offset + max(0, start - span.start),
+                speaker: .them(part.label),
+                text: words[part.words].joined(separator: " "),
+                trackSpan: OfflineSpeakerRelabeler.Span(start: start, end: max(start, end)),
+                wordSpans: Array(segment.wordSpans[part.words])
+            )
+        }
     }
 
     /// Reads the meeting mic stream ("You" track) into micPending.
@@ -423,7 +464,8 @@ final class MeetingTranscriptionService: ObservableObject {
         // then You. Sub-second windows are silence-gap artifacts — skip.
         if verdict.them, systemWindow.count >= 16_000 {
             // Windows are pause-bounded and usually single-voiced; the
-            // dominant diarized speaker labels the whole segment.
+            // dominant diarized speaker labels the whole segment live. The
+            // offline pass at stop splits the ones that hold two voices.
             var speaker = Speaker.them(nil)
             if let id = await diarizer.dominantSpeakerId(in: systemWindow) {
                 speaker = .them(speakerLabeler.label(forId: id))
@@ -443,10 +485,22 @@ final class MeetingTranscriptionService: ObservableObject {
         transcriber: any TranscriptionEngine
     ) async {
         do {
-            let text = try await transcriber.transcribe(samples: samples)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return }
-            segments.append(Segment(offset: offset, speaker: speaker, text: text, trackSpan: trackSpan))
+            var wordSpans: [OfflineSpeakerRelabeler.Span] = []
+            let text: String
+            if let trackSpan {
+                // Remote speech: keep word timings (window-relative) on the
+                // track timeline, for splitting at offline speaker changes.
+                let decoded = try await transcriber.transcribeWithWordTimings(samples: samples)
+                text = decoded.text
+                wordSpans = decoded.words.map {
+                    OfflineSpeakerRelabeler.Span(start: trackSpan.start + $0.start, end: trackSpan.start + $0.end)
+                }
+            } else {
+                text = try await transcriber.transcribe(samples: samples)
+            }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            segments.append(Segment(offset: offset, speaker: speaker, text: trimmed, trackSpan: trackSpan, wordSpans: wordSpans))
         } catch {
             NSLog("MeetingTranscription: \(speaker.label) chunk decode failed — \(error)")
         }

@@ -14,8 +14,10 @@ import XCTest
 ///
 /// The fixture holds far.wav/.rttm (remote speakers, what the system tap
 /// hears) and near.wav/.rttm (the local user). The first run downloads the
-/// FluidAudio diarization and LocalVQE models. Results print to the log and
-/// land in SPEEK_BENCH_DIR as JSON.
+/// FluidAudio diarization, Parakeet and LocalVQE models. Results print to
+/// the log and land in SPEEK_BENCH_DIR as JSON. TEST_RUNNER_SPEEK_BENCH_DEBUG=1
+/// also writes split-debug.txt there: every remote window's words against
+/// the reference and diarized turns, then the split transcript.
 ///
 /// scripts/make-ami-fixture.py builds the same layout from a real AMI
 /// meeting (overlapped speech, no local user) for the speaker-label tests.
@@ -35,9 +37,11 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
 
     // MARK: - Live vs offline labels
 
-    /// The same pause-bounded windows labeled two ways: the shipped live
-    /// path (online DiarizerManager per window) and the offline full-track
-    /// pass + overlap relabel.
+    /// The same pause-bounded windows labeled three ways: the shipped live
+    /// path (online DiarizerManager per window), the offline full-track pass
+    /// relabeling whole segments by overlap, and the shipped offline path,
+    /// which also splits segments at speaker changes using Parakeet's word
+    /// timings ("offlineSplit").
     func test_live_vs_offline_speaker_labels() async throws {
         let far = try Self.loadWav(dir.appendingPathComponent("far.wav"))
         let near = try Self.loadWav(dir.appendingPathComponent("near.wav"))
@@ -71,6 +75,26 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
         let offlineSeconds = Date().timeIntervalSince(offlineStart)
         await diarizer.endSession()
 
+        // The shipped path: Parakeet decodes each window with word timings,
+        // then relabeledSegments splits segments at offline speaker changes.
+        let engine = try await ParakeetEngine()
+        var segments: [MeetingTranscriptionService.Segment] = []
+        let asrStart = Date()
+        for (window, label) in zip(them, live) {
+            let decoded = try await engine.transcribeWithWordTimings(samples: window.system)
+            let span = window.systemSpan
+            segments.append(MeetingTranscriptionService.Segment(
+                offset: span.start, speaker: .them(label), text: decoded.text, trackSpan: span,
+                wordSpans: decoded.words.map { R.Span(start: span.start + $0.start, end: span.start + $0.end) }
+            ))
+        }
+        let asrSeconds = Date().timeIntervalSince(asrStart)
+        let splitStart = Date()
+        let split = try XCTUnwrap(MeetingTranscriptionService.relabeledSegments(segments, turns: turns))
+        let splitSeconds = Date().timeIntervalSince(splitStart)
+        let splitItems = split.map { R.Item(span: $0.trackSpan!, provisionalLabel: nil) }
+        let splitLabels = split.map(Self.themLabel)
+
         let duration = Double(far.count) / Double(Self.rate)
         let liveScore = Self.score(items: items, labels: live, truth: truth, duration: duration)
         let offlineScore = Self.score(items: items, labels: offline, truth: truth, duration: duration)
@@ -98,6 +122,28 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
         func quantile(_ q: Double) -> Double {
             spanSeconds.isEmpty ? 0 : spanSeconds[Int(q * Double(spanSeconds.count - 1))]
         }
+        let splitScore = Self.score(items: splitItems, labels: splitLabels, truth: truth, duration: duration)
+        // How the minimum part support trades stray splits for missed ones.
+        var sweep: [[String: Any]] = []
+        for threshold in [0.0, 0.15, 0.3, 0.5, 0.8] {
+            let swept = try XCTUnwrap(Self.split(segments, turns: turns, minimumPartSpeech: threshold))
+            let sweptScore = Self.score(items: swept.map { R.Item(span: $0.trackSpan!, provisionalLabel: nil) },
+                                        labels: swept.map(Self.themLabel), truth: truth, duration: duration)
+            sweep.append([
+                "minimumPartSpeech": threshold,
+                "segmentsAfterSplit": swept.count,
+                "transcriptConfusion": sweptScore.transcriptDER.confusion,
+                "wordSpeakerError": Self.wordSpeakerError(
+                    swept.flatMap { segment in segment.wordSpans.map { (span: $0, label: Self.themLabel(segment)) } }, truth: truth
+                ),
+            ])
+        }
+        if ProcessInfo.processInfo.environment["SPEEK_BENCH_DEBUG"] != nil {
+            try Self.splitDebug(segments: segments, offline: offline, split: split, truth: truth, turns: turns)
+                .write(to: dir.appendingPathComponent("split-debug.txt"), atomically: true, encoding: .utf8)
+        }
+        let wordsBefore = zip(segments, offline).flatMap { segment, label in segment.wordSpans.map { (span: $0, label: label) } }
+        let wordsAfter = zip(split, splitLabels).flatMap { segment, label in segment.wordSpans.map { (span: $0, label: label) } }
 
         let report: [String: Any] = [
             "audioMinutes": duration / 60,
@@ -106,8 +152,20 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
             "remoteSegments": items.count,
             "remoteSegmentSeconds": ["median": quantile(0.5), "p90": quantile(0.9), "max": quantile(1)],
             "live": liveScore.json + ["seconds": liveSeconds],
-            "offlineRelabel": offlineScore.json + ["seconds": offlineSeconds],
+            "offlineRelabel": offlineScore.json + [
+                "seconds": offlineSeconds,
+                "wordSpeakerError": Self.wordSpeakerError(wordsBefore, truth: truth),
+            ],
             "oracleDominantSpeaker": oracleScore.json,
+            "offlineSplit": splitScore.json + [
+                // Unsplit segments keep their ID; split ones become new parts.
+                "segmentsSplit": segments.count - Set(split.map(\.id)).intersection(segments.map(\.id)).count,
+                "segmentsAfterSplit": split.count,
+                "wordSpeakerError": Self.wordSpeakerError(wordsAfter, truth: truth),
+                "asrSecondsAllWindows": asrSeconds,
+                "splitSeconds": splitSeconds,
+                "minimumPartSpeechSweep": sweep,
+            ],
             "offlineDiarizerFrameDER": rawDER.json,
             "offlineDiarizerFrameDERSkipOverlap": rawDERSingle.json,
             "offlineOverlapShare": Self.overlapShare(turns, duration: duration),
@@ -124,6 +182,7 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
         ]
         try Self.write(report, named: "labels", in: dir)
         XCTAssertLessThanOrEqual(offlineScore.segmentError, liveScore.segmentError + 0.02)
+        XCTAssertLessThanOrEqual(splitScore.transcriptDER.confusion, offlineScore.transcriptDER.confusion + 0.01)
     }
 
     // MARK: - Stop latency on a long recording
@@ -491,6 +550,70 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
             ),
             labels: hypIds.count
         )
+    }
+
+    static func themLabel(_ segment: MeetingTranscriptionService.Segment) -> String? {
+        if case .them(let label) = segment.speaker { return label }
+        return nil
+    }
+
+    /// Each remote window's words with their reference and diarized
+    /// speakers, then the split transcript.
+    static func splitDebug(
+        segments: [MeetingTranscriptionService.Segment], offline: [String?],
+        split: [MeetingTranscriptionService.Segment], truth: [R.Turn], turns: [R.Turn]
+    ) -> String {
+        var lines: [String] = []
+        for (index, segment) in segments.enumerated() {
+            let span = segment.trackSpan!
+            lines.append(String(format: "#%d [%.2f–%.2f] live=%@ offline=%@ :: %@", index, span.start, span.end,
+                                themLabel(segment) ?? "-", offline[index] ?? "-", segment.text))
+            for (kind, list) in [("truth", truth), ("diar ", turns)] {
+                for t in list where t.end > span.start && t.start < span.end {
+                    lines.append(String(format: "    %@ %@ %.2f–%.2f", kind, t.speakerId, t.start, t.end))
+                }
+            }
+            for (word, ws) in zip(segment.text.split(whereSeparator: \.isWhitespace), segment.wordSpans) {
+                lines.append(String(format: "      %.2f–%.2f %@ truth=%@ diar=%@", ws.start, ws.end, String(word),
+                                    R.dominantSpeaker(for: ws, in: truth) ?? "-", R.dominantSpeaker(for: ws, in: turns) ?? "-"))
+            }
+        }
+        lines.append("---- after split")
+        for segment in split {
+            lines.append(String(format: "[%.2f–%.2f] %@ :: %@", segment.trackSpan!.start, segment.trackSpan!.end,
+                                themLabel(segment) ?? "-", segment.text))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// MeetingTranscriptionService.relabeledSegments with a different
+    /// minimum part support.
+    static func split(_ segments: [MeetingTranscriptionService.Segment], turns: [R.Turn], minimumPartSpeech: TimeInterval) -> [MeetingTranscriptionService.Segment]? {
+        let items = segments.map { R.Item(span: $0.trackSpan!, provisionalLabel: themLabel($0), words: $0.wordSpans) }
+        guard let parts = R.relabelSplitting(items: items, turns: turns, minimumPartSpeech: minimumPartSpeech) else { return nil }
+        return zip(segments, parts).flatMap { MeetingTranscriptionService.split($0, into: $1) }
+    }
+
+    /// Share of transcript words whose label maps to the wrong speaker (or
+    /// none) under the best one-to-one mapping. A word's true speaker is the
+    /// reference turn it overlaps most; words in no turn don't count. This is
+    /// what a reader sees: whose name sits in front of each word.
+    static func wordSpeakerError(_ words: [(span: R.Span, label: String?)], truth: [R.Turn]) -> Double {
+        let truthIds = Array(Set(truth.map(\.speakerId))).sorted()
+        let hypIds = Array(Set(words.compactMap(\.label))).sorted()
+        var weights = [[Double]](repeating: [Double](repeating: 0, count: truthIds.count), count: hypIds.count)
+        var pairs: [(hyp: Int?, truth: Int)] = []
+        for word in words {
+            guard let speaker = R.dominantSpeaker(for: word.span, in: truth),
+                  let t = truthIds.firstIndex(of: speaker) else { continue }
+            let h = word.label.flatMap { hypIds.firstIndex(of: $0) }
+            if let h { weights[h][t] += 1 }
+            pairs.append((h, t))
+        }
+        guard !pairs.isEmpty else { return 0 }
+        let mapping = optimalMapping(weights)
+        let correct = pairs.filter { pair in pair.hyp.map { mapping[$0] == pair.truth } ?? false }.count
+        return 1 - Double(correct) / Double(pairs.count)
     }
 
     struct DER {
