@@ -114,3 +114,45 @@ final class OfflineSpeakerRelabelerTests: XCTestCase {
         XCTAssertEqual(R.relabel(items: [], turns: [turn("A", 0, 1)]), [])
     }
 }
+
+@MainActor
+final class MeetingSegmentRelabelTests: XCTestCase {
+    private typealias Segment = MeetingTranscriptionService.Segment
+    private typealias R = OfflineSpeakerRelabeler
+
+    private func them(_ label: String?, _ start: Double, _ end: Double, _ text: String) -> Segment {
+        Segment(offset: start, speaker: .them(label), text: text, trackSpan: R.Span(start: start, end: end))
+    }
+
+    func test_only_remote_segments_are_relabeled() {
+        let segments = [
+            them("Speaker 1", 0, 4, "hello"),
+            Segment(offset: 4, speaker: .you, text: "hi"),
+            them("Speaker 2", 6, 9, "same person as before"),
+            them("Speaker 1", 10, 13, "a new voice"),
+        ]
+        let turns = [
+            R.Turn(speakerId: "A", start: 0, end: 9),
+            R.Turn(speakerId: "B", start: 10, end: 13),
+        ]
+        let relabeled = MeetingTranscriptionService.relabeledSegments(segments, turns: turns)
+        XCTAssertEqual(relabeled?.map(\.speaker.label), ["Speaker 1", "You", "Speaker 1", "Speaker 2"])
+        XCTAssertEqual(relabeled?.map(\.text), segments.map(\.text))
+        XCTAssertEqual(relabeled?.map(\.id), segments.map(\.id), "segments are relabeled in place, not rebuilt")
+    }
+
+    func test_empty_offline_result_keeps_live_labels() {
+        let segments = [them("Speaker 3", 0, 4, "hello")]
+        XCTAssertNil(MeetingTranscriptionService.relabeledSegments(segments, turns: []))
+    }
+
+    func test_relabel_is_visible_in_the_written_transcript() throws {
+        let segments = [them("Speaker 2", 0, 4, "hello"), Segment(offset: 5, speaker: .you, text: "hi")]
+        let relabeled = try XCTUnwrap(MeetingTranscriptionService.relabeledSegments(
+            segments, turns: [R.Turn(speakerId: "Z", start: 0, end: 4)]
+        ))
+        let body = MeetingTranscriptionService.renderTranscript(relabeled, startedAt: Date(timeIntervalSince1970: 0))
+        XCTAssertTrue(body.contains("**[00:00] Speaker 1:** hello"))
+        XCTAssertTrue(body.contains("**[00:05] You:** hi"))
+    }
+}

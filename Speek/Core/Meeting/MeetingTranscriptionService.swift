@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import FluidAudio
 import Foundation
 
 /// Live transcription of whatever is playing on the Mac — video calls,
@@ -167,6 +168,13 @@ final class MeetingTranscriptionService: ObservableObject {
 
     /// Stops capture, flushes the final chunk, writes the transcript.
     /// Returns the transcript file URL (nil if nothing was transcribed).
+    ///
+    /// The file is written right away with the live speaker labels; an
+    /// offline diarization pass over the whole system track then rewrites it
+    /// in place with better "Them" labels (~1.5 s per minute of audio on an
+    /// M1 Pro). Running that in the background keeps stop instant, keeps the
+    /// transcript safe if the app quits mid-pass, and lets a back-to-back
+    /// meeting start immediately.
     @discardableResult
     func stop() async -> URL? {
         guard isListening else { return nil }
@@ -190,58 +198,95 @@ final class MeetingTranscriptionService: ObservableObject {
             appendMic(await echoCanceller.finish())
         }
         await flushWindow()
+
+        let offlineModels = await diarizer.takeOfflineModels()
         await diarizer.endSession()
-        let captureClosed = Date()
-        await relabelWithOfflineDiarization()
-        systemSpool = nil // deletes the temp file
+        let snapshot = segments
+        let sessionStart = startedAt
+        let hasRemoteSpeech = snapshot.contains { $0.trackSpan != nil }
+        let track = hasRemoteSpeech && offlineModels != nil ? systemSpool?.finish() : nil
+        let trackDuration = systemSpool?.duration ?? 0
+        // Unlinks the temp file; `track` keeps reading its mapping.
+        systemSpool = nil
         state = .idle
-        let url = saveTranscript()
+
+        let body = Self.renderTranscript(snapshot, startedAt: sessionStart)
+        let url = snapshot.isEmpty ? nil : Self.writeTranscript(body, startedAt: sessionStart)
         NSLog(String(
-            format: "MeetingTranscription: stopped with %d segments — final flush %.2fs, offline relabel %.2fs, stop→file %.2fs",
-            segments.count,
-            captureClosed.timeIntervalSince(stopRequested),
-            Date().timeIntervalSince(captureClosed),
-            Date().timeIntervalSince(stopRequested)
+            format: "MeetingTranscription: stopped with %d segments — stop→file %.2fs",
+            snapshot.count, Date().timeIntervalSince(stopRequested)
         ))
+
+        if let url, let track, let offlineModels {
+            Task.detached(priority: .utility) {
+                await Self.relabelTranscript(
+                    snapshot, track: track, trackDuration: trackDuration, models: offlineModels,
+                    url: url, provisionalBody: body, startedAt: sessionStart, stopRequested: stopRequested
+                )
+            }
+        } else if url != nil, hasRemoteSpeech {
+            NSLog("MeetingTranscription: offline diarization models weren't ready; keeping live speaker labels")
+        }
         return url
     }
 
-    /// Re-diarizes the whole system track in one offline pass and replaces
-    /// the provisional per-window "Them" labels by maximum overlap. Any
-    /// failure keeps the live labels.
-    private func relabelWithOfflineDiarization() async {
-        let themIndices = segments.indices.filter { segments[$0].trackSpan != nil }
-        guard !themIndices.isEmpty, let spool = systemSpool, let source = spool.finish() else { return }
+    /// Re-diarizes the whole system track and rewrites the transcript with
+    /// the relabeled "Them" segments. Any failure keeps the live labels, and
+    /// a transcript the user has edited since it was written is left alone.
+    nonisolated private static func relabelTranscript(
+        _ segments: [Segment],
+        track: MappedPCM16Source,
+        trackDuration: TimeInterval,
+        models: OfflineDiarizerModels,
+        url: URL,
+        provisionalBody: String,
+        startedAt: Date,
+        stopRequested: Date
+    ) async {
         let started = Date()
         do {
-            let turns = try await diarizer.diarizeFullTrack(source)
-            let items = themIndices.map { index in
-                OfflineSpeakerRelabeler.Item(
-                    span: segments[index].trackSpan!,
-                    provisionalLabel: {
-                        if case .them(let label) = segments[index].speaker { return label }
-                        return nil
-                    }()
-                )
-            }
-            guard let labels = OfflineSpeakerRelabeler.relabel(items: items, turns: turns) else {
+            let turns = try await MeetingDiarizer.diarizeFullTrack(track, models: models)
+            guard let relabeled = relabeledSegments(segments, turns: turns) else {
                 NSLog("MeetingTranscription: offline diarization found no speech; keeping live labels")
                 return
             }
-            var changed = 0
-            for (index, label) in zip(themIndices, labels) {
-                let relabeled = Speaker.them(label)
-                if segments[index].speaker != relabeled { changed += 1 }
-                segments[index].speaker = relabeled
-            }
+            let changed = zip(segments, relabeled).filter { $0.speaker != $1.speaker }.count
+            let remote = segments.filter { $0.trackSpan != nil }.count
             let speakers = Set(turns.map(\.speakerId)).count
             NSLog(String(
                 format: "MeetingTranscription: offline diarization over %.0fs of audio in %.2fs — %d speakers, %d/%d remote segments relabeled",
-                spool.duration, Date().timeIntervalSince(started), speakers, changed, themIndices.count
+                trackDuration, Date().timeIntervalSince(started), speakers, changed, remote
             ))
+            let body = renderTranscript(relabeled, startedAt: startedAt)
+            guard body != provisionalBody else { return }
+            guard (try? String(contentsOf: url, encoding: .utf8)) == provisionalBody else {
+                NSLog("MeetingTranscription: transcript changed since it was written; not applying offline labels")
+                return
+            }
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            NSLog(String(format: "MeetingTranscription: relabeled transcript written — stop→relabeled file %.2fs", Date().timeIntervalSince(stopRequested)))
         } catch {
             NSLog("MeetingTranscription: offline diarization failed; keeping live labels — \(error)")
         }
+    }
+
+    /// `segments` with every "Them" segment relabeled from the offline
+    /// `turns` by maximum timestamp overlap. "You" segments are untouched.
+    /// Nil when the offline pass found nothing (keep the live labels).
+    nonisolated static func relabeledSegments(_ segments: [Segment], turns: [OfflineSpeakerRelabeler.Turn]) -> [Segment]? {
+        let remote = segments.indices.filter { segments[$0].trackSpan != nil }
+        let items = remote.map { index in
+            let segment = segments[index]
+            var live: String?
+            if case .them(let label) = segment.speaker { live = label }
+            return OfflineSpeakerRelabeler.Item(span: segment.trackSpan!, provisionalLabel: live)
+        }
+        guard let labels = OfflineSpeakerRelabeler.relabel(items: items, turns: turns) else { return nil }
+        var result = segments
+        for (index, label) in zip(remote, labels) {
+            result[index].speaker = .them(label)
+        }
+        return result
     }
 
     /// Reads the meeting mic stream ("You" track) into micPending.
@@ -408,8 +453,16 @@ final class MeetingTranscriptionService: ObservableObject {
 
     // MARK: - Transcript output
 
-    private func saveTranscript() -> URL? {
-        guard !segments.isEmpty else { return nil }
+    nonisolated static func renderTranscript(_ segments: [Segment], startedAt: Date) -> String {
+        var lines = ["# Meeting Transcript — \(startedAt.formatted(date: .abbreviated, time: .shortened))", ""]
+        for segment in segments {
+            lines.append("**[\(timestamp(segment.offset))] \(segment.speaker.label):** \(segment.text)")
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func writeTranscript(_ body: String, startedAt: Date) -> URL? {
         let dir = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Speek Transcripts", isDirectory: true)
@@ -418,13 +471,6 @@ final class MeetingTranscriptionService: ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH.mm"
         let url = dir.appendingPathComponent("Meeting \(formatter.string(from: startedAt)).md")
-
-        var lines = ["# Meeting Transcript — \(startedAt.formatted(date: .abbreviated, time: .shortened))", ""]
-        for segment in segments {
-            lines.append("**[\(Self.timestamp(segment.offset))] \(segment.speaker.label):** \(segment.text)")
-            lines.append("")
-        }
-        let body = lines.joined(separator: "\n")
         do {
             try body.write(to: url, atomically: true, encoding: .utf8)
             return url
@@ -434,7 +480,7 @@ final class MeetingTranscriptionService: ObservableObject {
         }
     }
 
-    static func timestamp(_ offset: TimeInterval) -> String {
+    nonisolated static func timestamp(_ offset: TimeInterval) -> String {
         let total = Int(offset.rounded())
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
