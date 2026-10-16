@@ -20,7 +20,7 @@ final class DictationSession: ObservableObject {
     /// tick. Empty when live preview is disabled or nothing decoded yet.
     @Published private(set) var partialText: String = ""
 
-    private let audio: AudioCaptureService
+    private let audio: any AudioCapturing
     private let livePreview = SpeechPreviewEngine.shared
     private let transcriber: any TranscriptionEngine
     /// Settable so the app can rebuild it (e.g. when the user edits their
@@ -29,6 +29,10 @@ final class DictationSession: ObservableObject {
     private let injector: any TextInjector
 
     private var samples: [Float] = []
+    /// The mic start the current recording began. Stop paths wait for it, so
+    /// a release that beats the start can't stop first and leave the mic
+    /// running afterwards.
+    private var captureStart: Task<AsyncStream<[Float]>, Error>?
     private var captureTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
     /// True while a latched (toggle) recording should end itself after a
@@ -47,7 +51,7 @@ final class DictationSession: ObservableObject {
     private let previewMinSamples = 8000
 
     init(
-        audio: AudioCaptureService,
+        audio: any AudioCapturing,
         transcriber: any TranscriptionEngine,
         pipeline: FormattingPipeline,
         injector: any TextInjector
@@ -60,6 +64,13 @@ final class DictationSession: ObservableObject {
 
     func startRecording() {
         guard state == .idle else { return }
+        // Start the mic first, off the main actor. Publishing .recording runs
+        // its observers synchronously (the overlay, and MediaPauseService's
+        // AppleScript, which can take hundreds of ms), and a main-actor task
+        // would queue behind all of that while the user is already talking.
+        let audio = self.audio
+        let start = Task.detached(priority: .userInitiated) { try await audio.start() }
+        captureStart = start
         // A new dictation supersedes any pending learn-from-correction watch.
         CorrectionLearner.shared.cancelPendingCheck()
         state = .recording
@@ -74,7 +85,7 @@ final class DictationSession: ObservableObject {
         captureTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let stream = try await self.audio.start()
+                let stream = try await start.value
                 for await chunk in stream {
                     let level = Self.rms(chunk)
                     await MainActor.run {
@@ -151,7 +162,7 @@ final class DictationSession: ObservableObject {
 
     func stopRecording() async {
         guard state == .recording else { return }
-        await audio.stop()
+        await stopCapture()
         previewTask?.cancel()
         previewTask = nil
         await livePreview.finish()
@@ -209,7 +220,7 @@ final class DictationSession: ObservableObject {
     /// "invalid audio data" path through Parakeet.
     func cancelRecording() async {
         guard state == .recording else { return }
-        await audio.stop()
+        await stopCapture()
         captureTask?.cancel()
         previewTask?.cancel()
         previewTask = nil
@@ -217,6 +228,13 @@ final class DictationSession: ObservableObject {
         samples = []
         partialText = ""
         state = .idle
+    }
+
+    /// Stops the mic once this recording's start has run.
+    private func stopCapture() async {
+        _ = try? await captureStart?.value
+        captureStart = nil
+        await audio.stop()
     }
 
     #if DEBUG

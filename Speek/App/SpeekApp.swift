@@ -67,6 +67,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         perms.refresh()
         NSLog("Speek permissions — mic: \(perms.hasMic), accessibility: \(perms.hasAccessibility), inputMonitoring: \(perms.hasInputMonitoring)")
 
+        // Prepare the mic engine now, not on the first press (only when
+        // already permitted: preparing must never be what prompts).
+        if perms.hasMic {
+            let audio = self.audio
+            Task { await audio.prewarm() }
+        }
+
         // Load Parakeet (model download on first launch).
         do {
             self.transcriber = try await ParakeetEngine()
