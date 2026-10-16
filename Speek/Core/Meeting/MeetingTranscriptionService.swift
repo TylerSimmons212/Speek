@@ -13,6 +13,9 @@ final class MeetingTranscriptionService: ObservableObject {
     enum State: Equatable {
         case idle
         case listening(since: Date)
+        /// Capture has stopped; the offline speaker pass and transcript
+        /// write are running. New sessions wait for this to finish.
+        case finalizing
         case failed(String)
     }
 
@@ -34,8 +37,13 @@ final class MeetingTranscriptionService: ObservableObject {
         let id = UUID()
         /// Seconds from session start.
         let offset: TimeInterval
-        let speaker: Speaker
+        /// Provisional (live) for remote speech until the offline pass at
+        /// stop replaces it.
+        var speaker: Speaker
         let text: String
+        /// Where a "Them" segment's audio sits in the session's system
+        /// track (seconds), for the offline relabel. Nil for "You".
+        var trackSpan: OfflineSpeakerRelabeler.Span? = nil
     }
 
     @Published private(set) var state: State = .idle
@@ -65,6 +73,17 @@ final class MeetingTranscriptionService: ObservableObject {
     /// Identifies distinct remote speakers within the system-audio track.
     private let diarizer = MeetingDiarizer()
     private var speakerLabeler = SpeakerLabeler()
+    /// The whole session's 16 kHz system track, spooled to disk for the
+    /// offline diarization pass at stop.
+    private var systemSpool: SystemTrackSpool?
+    /// Samples of system track seen this session (the spool's timeline,
+    /// counted separately so spans stay right even if the spool fails).
+    private var systemTrackSamples = 0
+    /// System-track index where the in-flight window's audio begins.
+    private var windowTrackStart = 0
+    /// LocalVQE on the mic track (Settings → Audio, beta). Decided at start.
+    private let echoCanceller = MeetingEchoCanceller()
+    private var echoCancellationEnabled = false
     /// Meeting-dedicated mic capture ("You" track) — a second engine
     /// instance; macOS happily feeds the mic to both this and dictation.
     private let mic = AudioCaptureService()
@@ -92,6 +111,8 @@ final class MeetingTranscriptionService: ObservableObject {
         return false
     }
 
+    var isFinalizing: Bool { state == .finalizing }
+
     var elapsed: TimeInterval {
         if case .listening(let since) = state { return Date().timeIntervalSince(since) }
         return 0
@@ -102,7 +123,7 @@ final class MeetingTranscriptionService: ObservableObject {
     // MARK: - Control
 
     func start() {
-        guard !isListening else { return }
+        guard !isListening, !isFinalizing else { return }
         guard transcriber != nil else {
             state = .failed("Speech model not loaded yet.")
             return
@@ -123,11 +144,22 @@ final class MeetingTranscriptionService: ObservableObject {
         windowStartOffset = 0
         gate = SilenceGateChunker()
         speakerLabeler = SpeakerLabeler()
+        systemSpool = SystemTrackSpool()
+        if systemSpool == nil {
+            NSLog("MeetingTranscription: couldn't create system-track spool; live speaker labels only")
+        }
+        systemTrackSamples = 0
+        windowTrackStart = 0
         startedAt = Date()
         state = .listening(since: startedAt)
         // Diarization models load in the background (download on first use);
         // early windows label as plain "Them" until ready.
         Task { await diarizer.startSession() }
+        echoCancellationEnabled = SettingsStore.shared.meetingEchoCancellation
+        if echoCancellationEnabled {
+            // Mic passes through raw until the model is ready.
+            Task { await echoCanceller.start() }
+        }
         startMicTrack()
         startPump()
         NSLog("MeetingTranscription: started")
@@ -138,20 +170,78 @@ final class MeetingTranscriptionService: ObservableObject {
     @discardableResult
     func stop() async -> URL? {
         guard isListening else { return nil }
-        pumpTask?.cancel()
+        state = .finalizing
+        audioLevel = 0
+        let stopRequested = Date()
+        // Let an in-flight tick (decode, enhance) finish first so it can't
+        // interleave with the final drain below.
+        let pump = pumpTask
         pumpTask = nil
+        pump?.cancel()
+        await pump?.value
         micTask?.cancel()
         micTask = nil
-        // Drain whatever both tracks still hold, then flush.
-        ingestDrainedAudio()
+        // Drain whatever both tracks still hold (tap.stop() discards its
+        // buffer), then flush.
+        await ingestDrainedAudio()
         tap.stop()
         await mic.stop()
+        if echoCancellationEnabled {
+            appendMic(await echoCanceller.finish())
+        }
         await flushWindow()
         await diarizer.endSession()
+        let captureClosed = Date()
+        await relabelWithOfflineDiarization()
+        systemSpool = nil // deletes the temp file
         state = .idle
-        audioLevel = 0
-        NSLog("MeetingTranscription: stopped with \(segments.count) segments")
-        return saveTranscript()
+        let url = saveTranscript()
+        NSLog(String(
+            format: "MeetingTranscription: stopped with %d segments — final flush %.2fs, offline relabel %.2fs, stop→file %.2fs",
+            segments.count,
+            captureClosed.timeIntervalSince(stopRequested),
+            Date().timeIntervalSince(captureClosed),
+            Date().timeIntervalSince(stopRequested)
+        ))
+        return url
+    }
+
+    /// Re-diarizes the whole system track in one offline pass and replaces
+    /// the provisional per-window "Them" labels by maximum overlap. Any
+    /// failure keeps the live labels.
+    private func relabelWithOfflineDiarization() async {
+        let themIndices = segments.indices.filter { segments[$0].trackSpan != nil }
+        guard !themIndices.isEmpty, let spool = systemSpool, let source = spool.finish() else { return }
+        let started = Date()
+        do {
+            let turns = try await diarizer.diarizeFullTrack(source)
+            let items = themIndices.map { index in
+                OfflineSpeakerRelabeler.Item(
+                    span: segments[index].trackSpan!,
+                    provisionalLabel: {
+                        if case .them(let label) = segments[index].speaker { return label }
+                        return nil
+                    }()
+                )
+            }
+            guard let labels = OfflineSpeakerRelabeler.relabel(items: items, turns: turns) else {
+                NSLog("MeetingTranscription: offline diarization found no speech; keeping live labels")
+                return
+            }
+            var changed = 0
+            for (index, label) in zip(themIndices, labels) {
+                let relabeled = Speaker.them(label)
+                if segments[index].speaker != relabeled { changed += 1 }
+                segments[index].speaker = relabeled
+            }
+            let speakers = Set(turns.map(\.speakerId)).count
+            NSLog(String(
+                format: "MeetingTranscription: offline diarization over %.0fs of audio in %.2fs — %d speakers, %d/%d remote segments relabeled",
+                spool.duration, Date().timeIntervalSince(started), speakers, changed, themIndices.count
+            ))
+        } catch {
+            NSLog("MeetingTranscription: offline diarization failed; keeping live labels — \(error)")
+        }
     }
 
     /// Reads the meeting mic stream ("You" track) into micPending.
@@ -164,6 +254,10 @@ final class MeetingTranscriptionService: ObservableObject {
                     guard !Task.isCancelled else { return }
                     if !self.micSuppressed {
                         self.micPending.append(contentsOf: chunk)
+                    } else if self.echoCancellationEnabled {
+                        // Keep the mic timeline continuous for the echo
+                        // canceller's alignment; silence never attributes.
+                        self.micPending.append(contentsOf: [Float](repeating: 0, count: chunk.count))
                     }
                 }
             } catch {
@@ -181,7 +275,7 @@ final class MeetingTranscriptionService: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 guard let self, !Task.isCancelled else { return }
-                self.ingestDrainedAudio()
+                await self.ingestDrainedAudio()
                 if self.gate.shouldFlush(windowDuration: Double(self.window16k.count) / 16_000) {
                     await self.flushWindow()
                 } else if self.livePreviewActive, self.window16k.count >= 16_000,
@@ -200,7 +294,7 @@ final class MeetingTranscriptionService: ObservableObject {
         }
     }
 
-    private func ingestDrainedAudio() {
+    private func ingestDrainedAudio() async {
         // System track ("Them").
         let native = tap.drain()
         // Session-persistent resampler: keeps converter state across drains
@@ -213,8 +307,12 @@ final class MeetingTranscriptionService: ObservableObject {
             ? []
             : (systemResampler?.resample(native) ?? [])
         // Mic track ("You") — already 16kHz mono from AudioCaptureService.
-        let micChunk = micPending
+        var micChunk = micPending
         micPending.removeAll(keepingCapacity: true)
+        if echoCancellationEnabled {
+            // The tap is the far-end reference: what the speakers played.
+            micChunk = await echoCanceller.process(mic: micChunk, reference: systemChunk)
+        }
 
         guard !systemChunk.isEmpty || !micChunk.isEmpty else { return }
 
@@ -223,7 +321,12 @@ final class MeetingTranscriptionService: ObservableObject {
             windowStartOffset = Date().timeIntervalSince(startedAt)
                 - Double(dominantCount) / 16_000
         }
+        if window16k.isEmpty {
+            windowTrackStart = systemTrackSamples
+        }
         window16k.append(contentsOf: systemChunk)
+        systemSpool?.append(systemChunk)
+        systemTrackSamples += systemChunk.count
         micWindow16k.append(contentsOf: micChunk)
 
         let systemRMS = Self.rms(systemChunk)
@@ -234,9 +337,19 @@ final class MeetingTranscriptionService: ObservableObject {
         // Indicator meter and the flush gate follow the louder track — the
         // conversation pauses only when BOTH sides go quiet.
         let combined = max(systemRMS, micRMS)
-        audioLevel = min(1, combined * 4)
+        if isListening {
+            audioLevel = min(1, combined * 4)
+        }
         let clockDuration = Double(max(systemChunk.count, micChunk.count)) / 16_000
         gate.observe(rms: combined, duration: clockDuration)
+    }
+
+    /// Late mic audio (the echo canceller's tail at stop) joins the
+    /// in-flight window.
+    private func appendMic(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
+        micWindow16k.append(contentsOf: samples)
+        micActivity.observe(rms: Self.rms(samples), duration: Double(samples.count) / 16_000, threshold: activityThreshold)
     }
 
     private func flushWindow() async {
@@ -255,6 +368,10 @@ final class MeetingTranscriptionService: ObservableObject {
 
         guard let transcriber else { return }
         let offset = max(0, windowStartOffset)
+        let trackSpan = OfflineSpeakerRelabeler.Span(
+            start: Double(windowTrackStart) / 16_000,
+            end: Double(windowTrackStart + systemWindow.count) / 16_000
+        )
 
         // Them first (the call audio is usually the conversational anchor),
         // then You. Sub-second windows are silence-gap artifacts — skip.
@@ -265,10 +382,10 @@ final class MeetingTranscriptionService: ObservableObject {
             if let id = await diarizer.dominantSpeakerId(in: systemWindow) {
                 speaker = .them(speakerLabeler.label(forId: id))
             }
-            await appendSegment(speaker: speaker, samples: systemWindow, offset: offset, transcriber: transcriber)
+            await appendSegment(speaker: speaker, samples: systemWindow, offset: offset, trackSpan: trackSpan, transcriber: transcriber)
         }
         if verdict.you, micWindow.count >= 16_000 {
-            await appendSegment(speaker: .you, samples: micWindow, offset: offset, transcriber: transcriber)
+            await appendSegment(speaker: .you, samples: micWindow, offset: offset, trackSpan: nil, transcriber: transcriber)
         }
     }
 
@@ -276,13 +393,14 @@ final class MeetingTranscriptionService: ObservableObject {
         speaker: Speaker,
         samples: [Float],
         offset: TimeInterval,
+        trackSpan: OfflineSpeakerRelabeler.Span?,
         transcriber: any TranscriptionEngine
     ) async {
         do {
             let text = try await transcriber.transcribe(samples: samples)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return }
-            segments.append(Segment(offset: offset, speaker: speaker, text: text))
+            segments.append(Segment(offset: offset, speaker: speaker, text: text, trackSpan: trackSpan))
         } catch {
             NSLog("MeetingTranscription: \(speaker.label) chunk decode failed — \(error)")
         }

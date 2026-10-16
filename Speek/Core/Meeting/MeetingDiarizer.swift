@@ -7,10 +7,24 @@ import Foundation
 /// session keeps speaker identities consistent across chunks; a new session
 /// starts numbering fresh.
 ///
+/// Two passes:
+/// - **Live** (`dominantSpeakerId`): the online `DiarizerManager` labels each
+///   pause-bounded window as it's transcribed. These labels are provisional —
+///   windows are often shorter than the ~5 s the online diarizer wants.
+/// - **Offline** (`diarizeFullTrack`): at stop, FluidAudio's offline pipeline
+///   (pyannote community-1 segmentation + WeSpeaker embeddings + VBx) runs
+///   over the whole system-audio track, and its turns replace the live
+///   labels before the transcript is written.
+///
 /// Best-effort: if the models can't load (first-run download failure), the
-/// meeting proceeds with plain "Them" labels.
+/// meeting proceeds with plain "Them" labels (live) or keeps the live labels
+/// (offline).
 actor MeetingDiarizer {
     private var manager: DiarizerManager?
+    /// Loaded at session start so stop doesn't pay for a download/compile.
+    /// `OfflineDiarizerModels` is Sendable; a fresh manager is built around
+    /// it per pass.
+    private var offlineModels: OfflineDiarizerModels?
 
     /// Loads (downloading on first use) the diarization models and starts a
     /// fresh speaker-tracking session.
@@ -24,11 +38,41 @@ actor MeetingDiarizer {
         } catch {
             NSLog("MeetingDiarizer: unavailable, falling back to plain labels — \(error)")
         }
+        if offlineModels == nil {
+            do {
+                offlineModels = try await OfflineDiarizerModels.load()
+            } catch {
+                // diarizeFullTrack retries the load at stop.
+                NSLog("MeetingDiarizer: offline models not ready at start — \(error)")
+            }
+        }
     }
 
     func endSession() {
         manager?.cleanup()
         manager = nil
+    }
+
+    /// Diarizes the complete session track in one pass. Throws on model or
+    /// inference failure — the caller keeps the live labels.
+    func diarizeFullTrack(_ source: some AudioSampleSource) async throws -> [OfflineSpeakerRelabeler.Turn] {
+        let models: OfflineDiarizerModels
+        if let offlineModels {
+            models = offlineModels
+        } else {
+            models = try await OfflineDiarizerModels.load()
+            offlineModels = models
+        }
+        let offline = OfflineDiarizerManager(config: .default)
+        offline.initialize(models: models)
+        let result = try await offline.process(audioSource: source, audioLoadingSeconds: 0)
+        return result.segments.map {
+            OfflineSpeakerRelabeler.Turn(
+                speakerId: $0.speakerId,
+                start: TimeInterval($0.startTimeSeconds),
+                end: TimeInterval($0.endTimeSeconds)
+            )
+        }
     }
 
     /// The dominant speaker ID in the window (by total speaking time), or
