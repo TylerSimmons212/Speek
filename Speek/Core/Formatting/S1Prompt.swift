@@ -16,22 +16,18 @@ enum S1Prompt {
     /// Exact system prompt from the s1-mini model card.
     static let system = "You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text."
 
-    /// Register/tone axis. Every combination of axes was trained; Speek ships
-    /// semi-formal (standard written English) and can expose the rest in
-    /// Settings later.
-    enum Styling: String, CaseIterable, Sendable {
-        case casual
-        case semiCasual = "semi-casual"
-        case semiFormal = "semi-formal"
-        case formal
+    /// Every combination of the three axes was trained, so any PolishStyle
+    /// renders to a valid control line.
+    static func controlLine(_ style: PolishStyle) -> String {
+        "[Styling: \(style.styling.rawValue)] [Structure: \(style.structure.rawValue)] [Context: \(style.context.rawValue)]"
     }
 
-    static func build(transcript: String, styling: Styling = .semiFormal) -> String {
+    static func build(transcript: String, style: PolishStyle = .standard) -> String {
         """
         <|im_start|>system
         \(system)<|im_end|>
         <|im_start|>user
-        [Styling: \(styling.rawValue)] [Structure: prose] [Context: general]
+        \(controlLine(style))
         \(transcript)<|im_end|>
         <|im_start|>assistant
         <think>
@@ -40,6 +36,14 @@ enum S1Prompt {
 
 
         """
+    }
+
+    /// Chunks are normalized independently and joined with a space, so a
+    /// whole-document layout (an email's greeting and sign-off, bullet
+    /// lines) would repeat or run together across chunks. Multi-chunk
+    /// dictations keep their register but fall back to plain prose.
+    static func style(_ style: PolishStyle, forChunkCount count: Int) -> PolishStyle {
+        count > 1 ? PolishStyle(styling: style.styling) : style
     }
 
     /// Output budget from the model card: 1.3 × input tokens + 32.

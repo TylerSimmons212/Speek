@@ -413,6 +413,15 @@ private struct FormattingPane: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if settings.polishEngine == .s1Mini {
                     S1ModelRow()
+                    Toggle(isOn: $settings.matchStyleToApp) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Match style to the app").font(.body.weight(.medium))
+                            Text("Chat apps like Messages and Slack get a relaxed style (lowercase starts, no trailing period). Mail apps lay out a dictated email with greeting and sign-off. Everything else stays standard.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
             }
             Section("Insertion") {
@@ -514,7 +523,7 @@ private struct AboutPane: View {
                 Text("Version \(appVersion) (\(buildNumber))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("Powered by Parakeet ASR & Apple Foundation Models")
+                Text("Powered by Parakeet ASR & S1-mini by Superwhisper")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
