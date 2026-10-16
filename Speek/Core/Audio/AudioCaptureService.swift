@@ -1,8 +1,15 @@
 import AVFoundation
 
+/// Mic capture as DictationSession sees it: start yields 16 kHz mono chunks
+/// until stop. AudioCaptureService in the app; a fake in tests.
+protocol AudioCapturing: Actor {
+    func start() throws -> AsyncStream<[Float]>
+    func stop()
+}
+
 /// Captures mic input as 16kHz mono Float32 PCM frames.
 /// Parakeet expects 16kHz mono input.
-actor AudioCaptureService {
+actor AudioCaptureService: AudioCapturing {
     enum CaptureError: Error { case engineFailed(Error), permissionDenied }
 
     private let engine = AVAudioEngine()
@@ -113,12 +120,24 @@ actor AudioCaptureService {
         return Array(UnsafeBufferPointer(start: floats, count: Int(outBuffer.frameLength)))
     }
 
+    /// Stops capture. pause(), not stop(): the mic hardware stops (the
+    /// privacy indicator goes off) but the engine keeps what prepare() set
+    /// up, so the next press skips re-initializing the input unit.
     func stop() {
         configChangeTask?.cancel()
         configChangeTask = nil
         engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        engine.pause()
         continuation?.finish()
         continuation = nil
+    }
+
+    /// Builds the input node and prepares the engine without starting it, so
+    /// the first press after launch doesn't pay for that setup (≈250–550 ms).
+    /// Nothing is captured and the mic stays off. No-op while capturing.
+    func prewarm() {
+        guard continuation == nil,
+              engine.inputNode.outputFormat(forBus: 0).sampleRate > 0 else { return }
+        engine.prepare()
     }
 }
