@@ -356,9 +356,11 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
         var duplicates = 0
         var localTurnsCaught = 0
         var localTurns = 0
+        /// "start+duration" of local turns no "You" segment covered.
+        var missed: [String] = []
         var json: [String: Any] {
             ["youSegments": youSegments, "duplicateYouSegments": duplicates,
-             "localTurnsCaught": "\(localTurnsCaught)/\(localTurns)"]
+             "localTurnsCaught": "\(localTurnsCaught)/\(localTurns)", "missedLocalTurns": missed]
         }
     }
 
@@ -381,6 +383,9 @@ final class MeetingSpeakerBenchmarkTests: XCTestCase {
             if local < 0.3 { counts.duplicates += 1 }
         }
         counts.localTurnsCaught = caught.count
+        counts.missed = nearTruth.indices.filter { !caught.contains($0) }.map {
+            String(format: "%.1fs+%.1fs", nearTruth[$0].start, nearTruth[$0].end - nearTruth[$0].start)
+        }
         return counts
     }
 

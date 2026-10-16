@@ -14,8 +14,9 @@ final class MeetingTranscriptionService: ObservableObject {
     enum State: Equatable {
         case idle
         case listening(since: Date)
-        /// Capture has stopped; the offline speaker pass and transcript
-        /// write are running. New sessions wait for this to finish.
+        /// Capture has stopped and the last window is being transcribed
+        /// (a second or so). The offline speaker pass runs afterwards in the
+        /// background and doesn't hold this state.
         case finalizing
         case failed(String)
     }

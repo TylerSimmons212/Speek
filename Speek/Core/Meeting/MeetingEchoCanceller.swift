@@ -16,16 +16,25 @@ actor MeetingEchoCanceller {
     /// Leading enhanced samples that belong to the aligner's mic prefill.
     private var prefillToDiscard = 0
     private var corrections = 0
+    /// Bumped by every start/finish, so a model load that completes after
+    /// its meeting already ended doesn't switch the canceller on.
+    private var generation = 0
 
     private(set) var isActive = false
 
     /// Loads (downloading ~19 MB on first use) the model and opens a stream.
     func start() async {
+        generation += 1
+        let session = generation
+        isActive = false
+        stream = nil
         do {
             // 256 ms calls: the meeting pump hands over ~500 ms per tick,
             // and the batch chunk is ~2.5x cheaper than the 16 ms one.
             let manager = try await LocalVqeManager(config: LocalVqeConfig(variant: .v13, chunk: .batch256ms))
-            stream = try await manager.makeStream()
+            let stream = try await manager.makeStream()
+            guard session == generation else { return }
+            self.stream = stream
             aligner = EchoReferenceAligner()
             prefillToDiscard = aligner.prefill
             corrections = 0
@@ -63,6 +72,7 @@ actor MeetingEchoCanceller {
     /// End of session: enhances everything still queued and drains the
     /// model's delay line, so total output length matches total mic input.
     func finish() async -> [Float] {
+        generation += 1
         defer {
             isActive = false
             stream = nil
